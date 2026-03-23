@@ -409,8 +409,8 @@ function selectPlatform(el){
   document.querySelectorAll('#platform-switch .psw-btn').forEach(b=>b.classList.remove('active','active-naver'));
   const isGoogle = el.dataset.val==='google';
   el.classList.add(isGoogle ? 'active' : 'active-naver');
-  // 기간 버튼: 구글만 활성화
-  document.querySelectorAll('.range-btn').forEach(b=>{
+  // 기간 버튼: 구글만 활성화 (개수 선택 버튼은 건드리지 않도록 data-range 필터 추가)
+  document.querySelectorAll('.range-btn[data-range]').forEach(b=>{
     if(b.dataset.range==='1m') return; // 1개월은 항상 활성
     b.disabled = !isGoogle;
   });
@@ -450,10 +450,10 @@ async function exploreTrend(){
 
 반드시 JSON만 출력하세요 (설명 없이):
 {"platform":"${platform}","category":"${category}","range":"${rangeLabel}","keywords":[
-  {"keyword":"키워드","intent":"인지|고려|전환","volume":숫자,"reason":"급상승 이유 20자 이내","related":["연관키워드1","연관키워드2","연관키워드3"],"sparkline":[0~100 숫자 24개]}
+  {"keyword":"키워드","intent":"인지|고려|전환","volume":숫자,"reason":"급상승 이유 20자 이내","related":["연관키워드1","연관키워드2","연관키워드3","연관키워드4","연관키워드5"],"sparkline":[0~100 숫자 24개]}
 ]}
 - volume: ${platform==='네이버'?'네이버 월간 검색량 절댓값 추정(PC+모바일 합산)':'구글 트렌드 관심도 기반 추정 검색량'}
-- related: 이 키워드와 함께 검색되는 연관 키워드 3개 (짧고 간결하게)
+- related: 이 키워드와 함께 검색되는 연관 키워드 5개 (짧고 간결하게)
 - sparkline: 지난 24시간 시간대별 상대적 관심도 (0~100, 24개 숫자 배열)`;
 
   const response=await callClaude(prompt); if(!response) return;
@@ -464,18 +464,30 @@ async function exploreTrend(){
     if (data.platform === '네이버') {
       result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">네이버 API(검색광고/데이터랩) 연동 중…</div></div></div>`;
       
-      // 검색광고 API 연동 (검색량)
-      await Promise.all(data.keywords.map(async kw => {
+      // 검색광고 API 연동 (최대 5개씩 일괄 요청으로 속도 5배 넘게 개선)
+      const kwChunks = [];
+      for (let i = 0; i < data.keywords.length; i += 5) {
+        kwChunks.push(data.keywords.slice(i, i + 5));
+      }
+      
+      await Promise.all(kwChunks.map(async chunk => {
+        const hintKeywords = chunk.map(k => k.keyword.replace(/[^a-zA-Z0-9가-힣\s]/g, '')).filter(k=>k).join(',');
+        if(!hintKeywords) return;
         try {
-          const res = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(kw.keyword)}`);
+          const res = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(hintKeywords)}`);
           if(res.ok) {
             const apiData = await res.json();
             if(apiData.keywordList && apiData.keywordList.length > 0) {
-              const exact = apiData.keywordList.find(k => k.relKeyword.replace(/ /g,'') === kw.keyword.replace(/ /g,'')) || apiData.keywordList[0];
-              const pc = typeof exact.monthlyPcQcCnt === 'number' ? exact.monthlyPcQcCnt : 10;
-              const mo = typeof exact.monthlyMobileQcCnt === 'number' ? exact.monthlyMobileQcCnt : 10;
-              kw.volume = pc + mo;
-              kw.isRealData = true;
+              for (const kw of chunk) {
+                const cleanKw = kw.keyword.replace(/ /g,'');
+                const exact = apiData.keywordList.find(k => k.relKeyword.replace(/ /g,'') === cleanKw);
+                if (exact) {
+                  const pc = typeof exact.monthlyPcQcCnt === 'number' ? exact.monthlyPcQcCnt : 10;
+                  const mo = typeof exact.monthlyMobileQcCnt === 'number' ? exact.monthlyMobileQcCnt : 10;
+                  kw.volume = pc + mo;
+                  kw.isRealData = true;
+                }
+              }
             }
           }
         } catch(e) {}
@@ -568,18 +580,13 @@ function renderTrendCards(data){
     const ic=intentColor[kw.intent]||'#64748B';
     const related=(kw.related||[]);
     const spark=makeSparkline(kw.sparkline||genSparkline(kw.volume), ic);
-    let trendBadge = '';
-    if (kw.trend) {
-      const emoji = kw.trend==='상승'?'📈':kw.trend==='하락'?'📉':'➡️';
-      trendBadge = `<span style="margin-left:5px;font-size:12px;background:var(--bg3);padding:2px 5px;border-radius:4px" title="${kw.trend}">${emoji}</span>`;
-    }
     
     html+=`<tr data-volume="${kw.volume}" data-kd="0" data-intent="${kw.intent}" id="tr-${TID}-${idx}">
       <td><input type="checkbox" class="row-checkbox" onchange="_trendRowCheck('${TID}',this)"></td>
       <td class="keyword-cell" style="font-weight:500">${kw.keyword}</td>
       <td>${intentPill(kw.intent)}</td>
       <td style="padding:8px 12px">${spark}</td>
-      <td class="num-cell" style="display:flex;align-items:center;">${fmtVol(kw.volume)}${trendBadge}</td>
+      <td class="num-cell">${fmtVol(kw.volume)}</td>
       <td class="text-xs" style="color:var(--text2);line-height:1.4">${kw.reason||'-'}</td>
       <td style="padding:10px 12px">
         <div style="display:flex;flex-wrap:wrap;gap:4px">
@@ -697,8 +704,9 @@ async function expandLongtail(){
   sessions++; localStorage.setItem('jugle_sessions',sessions);
   
   try {
-    // 쉼표로 나눈 첫 번째 키워드만 파라미터로 사용 (네이버 API는 최대 5개 지원하지만 여기선 1개만 우선 사용)
-    const hintKeyword = seeds.split(',')[0].trim();
+    // 쉼표로 나눈 첫 번째 키워드를 사용하되 특수문자는 제거 (네이버 검색광고 API 에러 방지)
+    const rawKeyword = seeds.split(',')[0].trim();
+    const hintKeyword = rawKeyword.replace(/[^a-zA-Z0-9가-힣\s]/g, '');
     const res = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(hintKeyword)}`);
     
     if (!res.ok) {
@@ -790,7 +798,7 @@ function renderLongtailTable(data,seeds){
   kws.forEach((kw,idx)=>{
     const isSaved=savedKeywords.some(k=>k.keyword===kw.keyword);
     const sparkColor={'인지':'#0284C7','고려':'#CA8A04','전환':'#16A34A'}[kw.intent] || '#64748B';
-    const trendHtml = kw.sparkline ? `<div style="display:flex;align-items:center;gap:6px"><span style="font-size:12px;" title="${kw.trend||''}">${kw.trend==='상승'?'📈':kw.trend==='하락'?'📉':kw.trend==='보합'?'➡️':'-'}</span>${makeSparkline(kw.sparkline, sparkColor)}</div>` : '-';
+    const trendHtml = kw.sparkline ? `<div style="display:flex;align-items:center;gap:6px">${makeSparkline(kw.sparkline, sparkColor)}</div>` : '-';
     
     html+=`<tr data-volume="${kw.volume}" data-kd="${kw.kd}" data-intent="${kw.intent}">
       <td><input type="checkbox" class="row-checkbox" onchange="toggleRow('${TID}',this)"></td>
