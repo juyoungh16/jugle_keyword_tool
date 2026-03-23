@@ -409,14 +409,18 @@ function selectPlatform(el){
   document.querySelectorAll('#platform-switch .psw-btn').forEach(b=>b.classList.remove('active','active-naver'));
   const isGoogle = el.dataset.val==='google';
   el.classList.add(isGoogle ? 'active' : 'active-naver');
-  // 기간 버튼: 구글만 활성화 (개수 선택 버튼은 건드리지 않도록 data-range 필터 추가)
-  document.querySelectorAll('.range-btn[data-range]').forEach(b=>{
-    if(b.dataset.range==='1m') return; // 1개월은 항상 활성
-    b.disabled = !isGoogle;
+  
+  document.querySelectorAll('.range-btn').forEach(b=>{
+    if(!isGoogle && b.dataset.range && b.dataset.range !== '1m') {
+      b.disabled = true; // 네이버는 기존대로 1m만 활성화
+    } else {
+      b.disabled = isGoogle; // 구글은 모두 비활성, 네이버는 개수 버튼 모두 활성
+    }
   });
+
   document.getElementById('range-note').textContent = isGoogle
-    ? '구글 트렌드: 기간별 관심도 비교 (상대값 0~100)'
-    : '네이버: 최근 1개월 고정 · 구글 탭 선택 시 기간 조절 가능';
+    ? 'Google Trends 실시간 · KR (개수/기간 선택 불가)'
+    : '네이버: 최근 1개월 고정 · 개수 조절 가능';
 }
 
 function selectRange(el){
@@ -441,10 +445,46 @@ async function exploreTrend(){
   const platform=getCurrentPlatform();
   const range=getCurrentRange();
   const count=getCurrentCount();
-  const rangeLabel={'7d':'최근 7일','1m':'최근 1개월','3m':'최근 3개월','12m':'최근 12개월'}[range];
+  const rangeLabel=platform==='구글'?'실시간':({'7d':'최근 7일','1m':'최근 1개월','3m':'최근 3개월','12m':'최근 12개월'}[range]);
   const result=document.getElementById('trend-result');
-  result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">${platform} · ${category} 트렌드 분석 중… (${count}개)</div></div></div>`;
   sessions++; localStorage.setItem('jugle_sessions',sessions);
+
+  if (platform === '구글') {
+    result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">Google Trends 실시간 RSS 가져오는 중…</div></div></div>`;
+    try {
+      const rssRes = await fetch('/.netlify/functions/google-trends');
+      const rssData = await rssRes.json();
+      if(!rssData.keywords || !rssData.keywords.length) throw new Error("RSS 응답이 비어있습니다.");
+      
+      result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">Google Trends 주요 키워드를 "${category}" 분야 관점에서 AI 분석 중…</div></div></div>`;
+      const rssListStr = rssData.keywords.map(k => `- ${k.keyword} (트래픽: ${k.traffic_str}, 뉴스: ${k.news_title})`).join('\n');
+      
+      const gPrompt = `한국 IT/테크 SEO 전문가. 아래는 현재 구글 코리아 실시간 급상승 검색어 TOP 20입니다.
+이 중에서 "${category}" 분야와 직간접적으로 연관 지을 수 있는 키워드만 엄선하여 분석하세요. (다수 연관 시 모두, 없으면 최대한 억지스럽지 않은 선에서 1~2개라도 도출)
+
+실시간 검색어:
+${rssListStr}
+
+반드시 JSON만 출력하세요 (설명 없이):
+{"platform":"구글","category":"${category}","range":"실시간","keywords":[
+  {"keyword":"키워드","intent":"인지|고려|전환","volume":숫자(트래픽의 숫자만),"reason":"급상승 이유(제공된 뉴스참고 20자)","related":["연관키워드1","연관키워드2","연관키워드3","연관키워드4","연관키워드5"]}
+]}`;
+
+      const response = await callClaude(gPrompt); if(!response) return;
+      let cleanJson = response.replace(/```json|```/g,'').trim();
+      if (!cleanJson.endsWith("}")) cleanJson = cleanJson.replace(/,([^,]*)$/, '') + "]}";
+      const data = JSON.parse(cleanJson);
+      data.platform = '구글';
+      data.range = '실시간';
+      renderTrendCards(data);
+    } catch(e) {
+      result.innerHTML=`<div class="card"><div class="stream-box">오류: ${e.message}</div></div>`;
+    }
+    return;
+  }
+
+  // --- 네이버 (기존 로직 유지) ---
+  result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">${platform} · ${category} 트렌드 분석 중… (${count}개)</div></div></div>`;
 
   const prompt=`한국 IT/테크 SEO 전문가. ${platform} 기준 "${category}" 분야에서 ${rangeLabel} 동안 검색량이 높거나 급상승한 트렌드 키워드 ${count}개를 분석해주세요.
 
@@ -452,7 +492,7 @@ async function exploreTrend(){
 {"platform":"${platform}","category":"${category}","range":"${rangeLabel}","keywords":[
   {"keyword":"키워드","intent":"인지|고려|전환","volume":숫자,"reason":"급상승 이유 20자 이내","related":["연관키워드1","연관키워드2","연관키워드3","연관키워드4","연관키워드5"]}
 ]}
-- volume: ${platform==='네이버'?'네이버 월간 검색량 절댓값 추정(PC+모바일 합산)':'구글 트렌드 관심도 기반 추정 검색량'}
+- volume: 네이버 월간 검색량 절댓값 추정(PC+모바일 합산)
 - related: 이 키워드와 함께 검색되는 연관 키워드 5개 (짧고 간결하게)`;
 
   const response=await callClaude(prompt); if(!response) return;
@@ -565,7 +605,7 @@ function renderTrendCards(data){
       <span>${platIcon} <strong>${data.platform}</strong> · ${data.category}</span>
       <span class="text-xs">📅 ${data.range||'최근 1개월'}</span>
       <span>총 <strong>${kws.length}개</strong></span>
-      <span class="text-xs" style="color:${data.platform==='네이버'?'var(--green)':'var(--amber)'};background:${data.platform==='네이버'?'var(--green-lt)':'var(--amber-lt)'};padding:2px 7px;border-radius:4px;border:1px solid ${data.platform==='네이버'?'#BBF7D0':'#FDE68A'};">${data.platform==='네이버'?'📊 네이버 실제 데이터':'⚠️ AI 추론'}</span>
+      <span class="text-xs" style="color:${data.platform==='네이버'?'var(--green)':'#2563EB'};background:${data.platform==='네이버'?'var(--green-lt)':'#DBEAFE'};padding:2px 7px;border-radius:4px;border:1px solid ${data.platform==='네이버'?'#BBF7D0':'#BFDBFE'};">${data.platform==='네이버'?'📊 네이버 실제 데이터':'📡 Google Trends 실시간'}</span>
       <div class="result-actions">
         <button class="btn btn-secondary btn-sm" id="sel-compare-btn-${TID}" onclick="compareSelected('${TID}')" disabled style="opacity:0.4">⚖️ 비교 (<span id="sel-count-${TID}">0</span>)</button>
         <button class="btn btn-secondary btn-sm" id="sel-save-btn-${TID}" onclick="saveSelected('${TID}')" disabled style="opacity:0.4">💾 선택 저장</button>
@@ -578,8 +618,8 @@ function renderTrendCards(data){
           <th style="width:36px"><input type="checkbox" class="th-checkbox" id="master-cb-${TID}" onchange="_trendMasterCheck(this)"></th>
           <th>키워드</th>
           <th style="width:70px">의도</th>
-          <th style="width:90px">${data.platform==='네이버'?'12주 추이':'24h 추이'}</th>
-          <th style="width:110px">검색량</th>
+          ${data.platform==='네이버'?'<th style="width:90px">12주 추이</th>':''}
+          <th style="width:110px">${data.platform==='네이버'?'검색량':'트래픽'}</th>
           <th>급상승 이유</th>
           <th>연관 키워드</th>
           <th style="width:36px"></th>
@@ -590,14 +630,14 @@ function renderTrendCards(data){
     const isSaved=savedKeywords.some(k=>k.keyword===kw.keyword);
     const ic=intentColor[kw.intent]||'#64748B';
     const related=(kw.related||[]);
-    const spark=makeSparkline(kw.sparkline||genSparkline(kw.volume), ic);
+    const spark = data.platform==='네이버' ? `<td style="padding:8px 12px">${makeSparkline(kw.sparkline||[], ic)}</td>` : '';
     
     html+=`<tr data-volume="${kw.volume}" data-kd="0" data-intent="${kw.intent}" id="tr-${TID}-${idx}">
       <td><input type="checkbox" class="row-checkbox" onchange="_trendRowCheck('${TID}',this)"></td>
       <td class="keyword-cell" style="font-weight:500">${kw.keyword}</td>
       <td>${intentPill(kw.intent)}</td>
-      <td style="padding:8px 12px">${spark}</td>
-      <td class="num-cell">${fmtVol(kw.volume)}</td>
+      ${spark}
+      <td class="num-cell">${fmtVol(kw.volume)}${data.platform==='구글'?'+':''}</td>
       <td class="text-xs" style="color:var(--text2);line-height:1.4">${kw.reason||'-'}</td>
       <td style="padding:10px 12px">
         <div style="display:flex;flex-wrap:wrap;gap:4px">
