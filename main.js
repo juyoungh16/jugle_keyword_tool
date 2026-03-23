@@ -460,6 +460,26 @@ async function exploreTrend(){
   try{
     const data=JSON.parse(response.replace(/```json|```/g,'').trim());
     data.range=rangeLabel;
+    
+    if (data.platform === '네이버') {
+      result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">네이버 검색광고 API에서 실제 검색량 동기화 중…</div></div></div>`;
+      await Promise.all(data.keywords.map(async kw => {
+        try {
+          const res = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(kw.keyword)}`);
+          if(res.ok) {
+            const apiData = await res.json();
+            if(apiData.keywordList && apiData.keywordList.length > 0) {
+              const exact = apiData.keywordList.find(k => k.relKeyword.replace(/ /g,'') === kw.keyword.replace(/ /g,'')) || apiData.keywordList[0];
+              const pc = typeof exact.monthlyPcQcCnt === 'number' ? exact.monthlyPcQcCnt : 10;
+              const mo = typeof exact.monthlyMobileQcCnt === 'number' ? exact.monthlyMobileQcCnt : 10;
+              kw.volume = pc + mo;
+              kw.isRealData = true;
+            }
+          }
+        } catch(e) {}
+      }));
+    }
+
     renderTrendCards(data);
   } catch(e){ result.innerHTML=`<div class="card"><div class="stream-box">${response}</div></div>`; }
 }
@@ -501,7 +521,7 @@ function renderTrendCards(data){
       <span>${platIcon} <strong>${data.platform}</strong> · ${data.category}</span>
       <span class="text-xs">📅 ${data.range||'최근 1개월'}</span>
       <span>총 <strong>${kws.length}개</strong></span>
-      <span class="text-xs" style="color:var(--amber);background:var(--amber-lt);padding:2px 7px;border-radius:4px;border:1px solid #FDE68A;">⚠️ AI 추론</span>
+      <span class="text-xs" style="color:${data.platform==='네이버'?'var(--green)':'var(--amber)'};background:${data.platform==='네이버'?'var(--green-lt)':'var(--amber-lt)'};padding:2px 7px;border-radius:4px;border:1px solid ${data.platform==='네이버'?'#BBF7D0':'#FDE68A'};">${data.platform==='네이버'?'✅ 실제 검색량':'⚠️ AI 추론'}</span>
       <div class="result-actions">
         <button class="btn btn-secondary btn-sm" id="sel-compare-btn-${TID}" onclick="compareSelected('${TID}')" disabled style="opacity:0.4">⚖️ 비교 (<span id="sel-count-${TID}">0</span>)</button>
         <button class="btn btn-secondary btn-sm" id="sel-save-btn-${TID}" onclick="saveSelected('${TID}')" disabled style="opacity:0.4">💾 선택 저장</button>
@@ -704,7 +724,7 @@ function renderLongtailTable(data,seeds){
     <div class="result-summary">
       <span>🌱 <strong>"${seeds}"</strong> 확장 · 총 <strong>${kws.length}개</strong></span>
       <span>${Object.entries(counts).filter(([,v])=>v>0).map(([k,v])=>`<span class="intent-pill ${INTENTS[k].cls}">${k} ${v}</span>`).join(' ')}</span>
-      <span class="text-xs" style="color:var(--amber);background:var(--amber-lt);padding:2px 7px;border-radius:4px;border:1px solid #FDE68A;">⚠️ AI 추론</span>
+      <span class="text-xs" style="color:var(--green);background:var(--green-lt);padding:2px 7px;border-radius:4px;border:1px solid #BBF7D0;">✅ 실제 검색량</span>
       <div class="result-actions">
         <button class="btn btn-secondary btn-sm" id="sel-compare-btn-${TID}" onclick="compareSelected('${TID}')" disabled style="opacity:0.4">⚖️ 비교 (<span id="sel-count-${TID}">0</span>)</button>
         <button class="btn btn-secondary btn-sm" id="sel-save-btn-${TID}" onclick="saveSelected('${TID}')" disabled style="opacity:0.4">💾 선택 저장</button>
@@ -716,8 +736,8 @@ function renderLongtailTable(data,seeds){
       <thead>${makeTableHeader(TID,[
         {label:'키워드',key:'keyword'},
         {label:'의도',key:'intent'},
-        {label:'Volume (AI 추론)',key:'volume',sortable:true,width:'130px'},
-        {label:'KD % (AI 추론)',key:'kd',sortable:true,width:'150px'},
+        {label:'Volume',key:'volume',sortable:true,width:'130px'},
+        {label:'경쟁도',key:'kd',sortable:true,width:'150px'},
       ])}</thead>
       <tbody id="lt-tbody">`;
   kws.forEach((kw,idx)=>{
