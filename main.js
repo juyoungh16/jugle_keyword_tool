@@ -462,7 +462,9 @@ async function exploreTrend(){
     data.range=rangeLabel;
     
     if (data.platform === '네이버') {
-      result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">네이버 검색광고 API에서 실제 검색량 동기화 중…</div></div></div>`;
+      result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">네이버 API(검색광고/데이터랩) 연동 중…</div></div></div>`;
+      
+      // 검색광고 API 연동 (검색량)
       await Promise.all(data.keywords.map(async kw => {
         try {
           const res = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(kw.keyword)}`);
@@ -478,6 +480,25 @@ async function exploreTrend(){
           }
         } catch(e) {}
       }));
+      
+      // 데이터랩 API 연동 (12주 트렌드 스파크라인 및 방향)
+      try {
+        const dlRes = await fetch('/.netlify/functions/naver-datalab', {
+          method: 'POST',
+          body: JSON.stringify({ keywords: data.keywords.map(k => k.keyword) })
+        });
+        if (dlRes.ok) {
+          const dlData = await dlRes.json();
+          for (let kw of data.keywords) {
+            if (dlData[kw.keyword]) {
+              kw.sparkline = dlData[kw.keyword].ratios;
+              kw.trend = dlData[kw.keyword].trend;
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Datalab Error:', e);
+      }
     }
 
     renderTrendCards(data);
@@ -521,7 +542,7 @@ function renderTrendCards(data){
       <span>${platIcon} <strong>${data.platform}</strong> · ${data.category}</span>
       <span class="text-xs">📅 ${data.range||'최근 1개월'}</span>
       <span>총 <strong>${kws.length}개</strong></span>
-      <span class="text-xs" style="color:${data.platform==='네이버'?'var(--green)':'var(--amber)'};background:${data.platform==='네이버'?'var(--green-lt)':'var(--amber-lt)'};padding:2px 7px;border-radius:4px;border:1px solid ${data.platform==='네이버'?'#BBF7D0':'#FDE68A'};">${data.platform==='네이버'?'✅ 실제 검색량':'⚠️ AI 추론'}</span>
+      <span class="text-xs" style="color:${data.platform==='네이버'?'var(--green)':'var(--amber)'};background:${data.platform==='네이버'?'var(--green-lt)':'var(--amber-lt)'};padding:2px 7px;border-radius:4px;border:1px solid ${data.platform==='네이버'?'#BBF7D0':'#FDE68A'};">${data.platform==='네이버'?'📊 네이버 실제 데이터':'⚠️ AI 추론'}</span>
       <div class="result-actions">
         <button class="btn btn-secondary btn-sm" id="sel-compare-btn-${TID}" onclick="compareSelected('${TID}')" disabled style="opacity:0.4">⚖️ 비교 (<span id="sel-count-${TID}">0</span>)</button>
         <button class="btn btn-secondary btn-sm" id="sel-save-btn-${TID}" onclick="saveSelected('${TID}')" disabled style="opacity:0.4">💾 선택 저장</button>
@@ -534,8 +555,8 @@ function renderTrendCards(data){
           <th style="width:36px"><input type="checkbox" class="th-checkbox" id="master-cb-${TID}" onchange="_trendMasterCheck(this)"></th>
           <th>키워드</th>
           <th style="width:70px">의도</th>
-          <th style="width:90px">24h 추이</th>
-          <th style="width:90px">검색량</th>
+          <th style="width:90px">${data.platform==='네이버'?'12주 추이':'24h 추이'}</th>
+          <th style="width:110px">검색량</th>
           <th>급상승 이유</th>
           <th>연관 키워드</th>
           <th style="width:36px"></th>
@@ -547,12 +568,18 @@ function renderTrendCards(data){
     const ic=intentColor[kw.intent]||'#64748B';
     const related=(kw.related||[]);
     const spark=makeSparkline(kw.sparkline||genSparkline(kw.volume), ic);
+    let trendBadge = '';
+    if (kw.trend) {
+      const emoji = kw.trend==='상승'?'📈':kw.trend==='하락'?'📉':'➡️';
+      trendBadge = `<span style="margin-left:5px;font-size:12px;background:var(--bg3);padding:2px 5px;border-radius:4px" title="${kw.trend}">${emoji}</span>`;
+    }
+    
     html+=`<tr data-volume="${kw.volume}" data-kd="0" data-intent="${kw.intent}" id="tr-${TID}-${idx}">
       <td><input type="checkbox" class="row-checkbox" onchange="_trendRowCheck('${TID}',this)"></td>
       <td class="keyword-cell" style="font-weight:500">${kw.keyword}</td>
       <td>${intentPill(kw.intent)}</td>
       <td style="padding:8px 12px">${spark}</td>
-      <td class="num-cell">${fmtVol(kw.volume)}</td>
+      <td class="num-cell" style="display:flex;align-items:center;">${fmtVol(kw.volume)}${trendBadge}</td>
       <td class="text-xs" style="color:var(--text2);line-height:1.4">${kw.reason||'-'}</td>
       <td style="padding:10px 12px">
         <div style="display:flex;flex-wrap:wrap;gap:4px">
@@ -707,6 +734,25 @@ async function expandLongtail(){
     // 검색량 순 정렬
     keywords.sort((a, b) => b.volume - a.volume);
     
+    // 데이터랩 API 연동 (12주 트렌드 스파크라인 및 방향)
+    try {
+      const dlRes = await fetch('/.netlify/functions/naver-datalab', {
+        method: 'POST',
+        body: JSON.stringify({ keywords: keywords.map(k => k.keyword) })
+      });
+      if (dlRes.ok) {
+        const dlData = await dlRes.json();
+        for (let kw of keywords) {
+          if (dlData[kw.keyword]) {
+            kw.sparkline = dlData[kw.keyword].ratios;
+            kw.trend = dlData[kw.keyword].trend;
+          }
+        }
+      }
+    } catch(e) {
+      console.error('Datalab Error in expandLongtail:', e);
+    }
+    
     renderLongtailTable({ keywords }, seeds);
   } catch(e) {
     result.innerHTML=`<div class="card"><div class="stream-box">오류: ${e.message}<br><br>※ Netlify 환경변수(NAVER_API_KEY, NAVER_SECRET_KEY, NAVER_CUSTOMER_ID)가 정상적으로 설정되었는지 확인하세요.</div></div>`;
@@ -736,17 +782,22 @@ function renderLongtailTable(data,seeds){
       <thead>${makeTableHeader(TID,[
         {label:'키워드',key:'keyword'},
         {label:'의도',key:'intent'},
-        {label:'Volume',key:'volume',sortable:true,width:'130px'},
+        {label:'Volume',key:'volume',sortable:true,width:'110px'},
+        {label:'추이',key:'trend',sortable:false,width:'120px'},
         {label:'경쟁도',key:'kd',sortable:true,width:'150px'},
       ])}</thead>
       <tbody id="lt-tbody">`;
   kws.forEach((kw,idx)=>{
     const isSaved=savedKeywords.some(k=>k.keyword===kw.keyword);
+    const sparkColor={'인지':'#0284C7','고려':'#CA8A04','전환':'#16A34A'}[kw.intent] || '#64748B';
+    const trendHtml = kw.sparkline ? `<div style="display:flex;align-items:center;gap:6px"><span style="font-size:12px;" title="${kw.trend||''}">${kw.trend==='상승'?'📈':kw.trend==='하락'?'📉':kw.trend==='보합'?'➡️':'-'}</span>${makeSparkline(kw.sparkline, sparkColor)}</div>` : '-';
+    
     html+=`<tr data-volume="${kw.volume}" data-kd="${kw.kd}" data-intent="${kw.intent}">
       <td><input type="checkbox" class="row-checkbox" onchange="toggleRow('${TID}',this)"></td>
       <td class="keyword-cell">${kw.keyword}</td>
       <td>${intentPill(kw.intent,TID,idx)}</td>
       <td class="num-cell">${fmtVol(kw.volume)}</td>
+      <td style="padding:6px 12px;">${trendHtml}</td>
       <td>${kdBar(kw.kd)}</td>
       <td>${makeKebab('l'+idx,kw.keyword,kw.intent,'롱테일확장',isSaved)}</td>
     </tr>`;
