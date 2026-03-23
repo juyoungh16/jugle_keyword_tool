@@ -646,15 +646,51 @@ async function expandLongtail(){
   const seeds=document.getElementById('seed-keyword').value.trim();
   if(!seeds){alert('씨앗 키워드를 입력해주세요.');return;}
   const result=document.getElementById('longtail-result');
-  result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">"${seeds}" 롱테일 확장 중…</div></div></div>`;
+  result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">네이버 검색광고 API에서 "${seeds}" 연관 키워드 조회 중…</div></div></div>`;
   sessions++; localStorage.setItem('jugle_sessions',sessions);
-  const prompt=`한국어 SEO 전문가. "${seeds}" 씨앗 키워드 롱테일 확장.
-질문형(~이란,~방법,~차이), 비교형(~vs,~대신), 구체화형(~가이드,~사례), 대상특화형(~개발자,~스타트업) 골고루 생성.
-JSON만: {"keywords":[{"keyword":"롱테일","intent":"인지|고려|전환","volume":숫자,"kd":숫자}]}
-30~40개. 네이버 기준 volume.`;
-  const response=await callClaude(prompt); if(!response) return;
-  try{ const data=JSON.parse(response.replace(/```json|```/g,'').trim()); renderLongtailTable(data,seeds); }
-  catch{ result.innerHTML=`<div class="card"><div class="stream-box">${response}</div></div>`; }
+  
+  try {
+    // 쉼표로 나눈 첫 번째 키워드만 파라미터로 사용 (네이버 API는 최대 5개 지원하지만 여기선 1개만 우선 사용)
+    const hintKeyword = seeds.split(',')[0].trim();
+    const res = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(hintKeyword)}`);
+    
+    if (!res.ok) {
+      const errInfo = await res.json();
+      throw new Error(errInfo.error || 'API 연동 오류');
+    }
+    
+    const data = await res.json();
+    if (!data.keywordList || data.keywordList.length === 0) {
+      result.innerHTML = `<div class="card"><div class="text-xs">관련 키워드가 없습니다.</div></div>`;
+      return;
+    }
+    
+    // 네이버 검색광고 API 결과 가공 (최대 40개)
+    const keywords = data.keywordList.slice(0, 40).map(k => {
+      // 10 미만 값('< 10' 등 문자열)은 숫자 10으로 취급
+      const pc = typeof k.monthlyPcQcCnt === 'number' ? k.monthlyPcQcCnt : 10;
+      const mo = typeof k.monthlyMobileQcCnt === 'number' ? k.monthlyMobileQcCnt : 10;
+      const vol = pc + mo;
+      
+      const compMap = {'높음': 80, '중간': 50, '낮음': 20};
+      const kd = compMap[k.compIdx] || 50;
+      
+      // 인텐트 규칙 기반 판단 (AI 추론 대신)
+      let intent = '인지';
+      const kw = k.relKeyword;
+      if (/(가격|비용|신청|다운|할인|구매|가입|예약|판매|견적)/.test(kw)) intent = '전환';
+      else if (/(추천|비교|후기|차이|순위|리뷰|장단점|베스트)/.test(kw)) intent = '고려';
+      
+      return { keyword: kw, intent, volume: vol, kd };
+    });
+    
+    // 검색량 순 정렬
+    keywords.sort((a, b) => b.volume - a.volume);
+    
+    renderLongtailTable({ keywords }, seeds);
+  } catch(e) {
+    result.innerHTML=`<div class="card"><div class="stream-box">오류: ${e.message}<br><br>※ Netlify 환경변수(NAVER_API_KEY, NAVER_SECRET_KEY, NAVER_CUSTOMER_ID)가 정상적으로 설정되었는지 확인하세요.</div></div>`;
+  }
 }
 
 function renderLongtailTable(data,seeds){
