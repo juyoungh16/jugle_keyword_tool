@@ -450,66 +450,77 @@ async function exploreTrend(){
 
 반드시 JSON만 출력하세요 (설명 없이):
 {"platform":"${platform}","category":"${category}","range":"${rangeLabel}","keywords":[
-  {"keyword":"키워드","intent":"인지|고려|전환","volume":숫자,"reason":"급상승 이유 20자 이내","related":["연관키워드1","연관키워드2","연관키워드3","연관키워드4","연관키워드5"],"sparkline":[0~100 숫자 24개]}
+  {"keyword":"키워드","intent":"인지|고려|전환","volume":숫자,"reason":"급상승 이유 20자 이내","related":["연관키워드1","연관키워드2","연관키워드3","연관키워드4","연관키워드5"]}
 ]}
 - volume: ${platform==='네이버'?'네이버 월간 검색량 절댓값 추정(PC+모바일 합산)':'구글 트렌드 관심도 기반 추정 검색량'}
-- related: 이 키워드와 함께 검색되는 연관 키워드 5개 (짧고 간결하게)
-- sparkline: 지난 24시간 시간대별 상대적 관심도 (0~100, 24개 숫자 배열)`;
+- related: 이 키워드와 함께 검색되는 연관 키워드 5개 (짧고 간결하게)`;
 
   const response=await callClaude(prompt); if(!response) return;
   try{
-    const data=JSON.parse(response.replace(/```json|```/g,'').trim());
+    let cleanJson = response.replace(/```json|```/g,'').trim();
+    // AI 출력 초과로 JSON이 중간에 잘린 경우를 복구하기 위한 최후의 방어
+    if (!cleanJson.endsWith("}")) {
+      cleanJson = cleanJson.replace(/,([^,]*)$/, '') + "]}";
+    }
+    
+    const data=JSON.parse(cleanJson);
     data.range=rangeLabel;
     
     if (data.platform === '네이버') {
-      result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">네이버 API(검색광고/데이터랩) 연동 중…</div></div></div>`;
+      const totalKws = data.keywords.length;
+      result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text" id="api-progress">네이버 API 연동 중… (0/${totalKws})</div></div></div>`;
       
-      // 검색광고 API 연동 (최대 5개씩 일괄 요청으로 속도 5배 넘게 개선)
+      // 5개 단위 청크
       const kwChunks = [];
-      for (let i = 0; i < data.keywords.length; i += 5) {
+      for (let i = 0; i < totalKws; i += 5) {
         kwChunks.push(data.keywords.slice(i, i + 5));
       }
       
-      await Promise.all(kwChunks.map(async chunk => {
+      let processed = 0;
+      for (const chunk of kwChunks) {
         const hintKeywords = chunk.map(k => k.keyword.replace(/[^a-zA-Z0-9가-힣\s]/g, '')).filter(k=>k).join(',');
-        if(!hintKeywords) return;
-        try {
-          const res = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(hintKeywords)}`);
-          if(res.ok) {
-            const apiData = await res.json();
-            if(apiData.keywordList && apiData.keywordList.length > 0) {
-              for (const kw of chunk) {
-                const cleanKw = kw.keyword.replace(/ /g,'');
-                const exact = apiData.keywordList.find(k => k.relKeyword.replace(/ /g,'') === cleanKw);
-                if (exact) {
-                  const pc = typeof exact.monthlyPcQcCnt === 'number' ? exact.monthlyPcQcCnt : 10;
-                  const mo = typeof exact.monthlyMobileQcCnt === 'number' ? exact.monthlyMobileQcCnt : 10;
-                  kw.volume = pc + mo;
-                  kw.isRealData = true;
-                }
-              }
+        const keywordsOnly = chunk.map(k => k.keyword);
+        
+        let p1 = Promise.resolve();
+        let p2 = Promise.resolve();
+        
+        if (hintKeywords) {
+          p1 = fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(hintKeywords)}`)
+               .then(res => res.ok ? res.json() : null).catch(() => null);
+        }
+        p2 = fetch('/.netlify/functions/naver-datalab', {
+          method: 'POST', body: JSON.stringify({ keywords: keywordsOnly })
+        }).then(res => res.ok ? res.json() : null).catch(() => null);
+
+        const [apiData, dlData] = await Promise.all([p1, p2]);
+
+        if (apiData && apiData.keywordList) {
+          for (const kw of chunk) {
+            const cleanKw = kw.keyword.replace(/ /g,'');
+            const exact = apiData.keywordList.find(k => k.relKeyword.replace(/ /g,'') === cleanKw);
+            if (exact) {
+              const pc = typeof exact.monthlyPcQcCnt === 'number' ? exact.monthlyPcQcCnt : 10;
+              const mo = typeof exact.monthlyMobileQcCnt === 'number' ? exact.monthlyMobileQcCnt : 10;
+              kw.volume = pc + mo;
+              kw.isRealData = true;
             }
           }
-        } catch(e) {}
-      }));
-      
-      // 데이터랩 API 연동 (12주 트렌드 스파크라인 및 방향)
-      try {
-        const dlRes = await fetch('/.netlify/functions/naver-datalab', {
-          method: 'POST',
-          body: JSON.stringify({ keywords: data.keywords.map(k => k.keyword) })
-        });
-        if (dlRes.ok) {
-          const dlData = await dlRes.json();
-          for (let kw of data.keywords) {
+        }
+        if (dlData) {
+          for (const kw of chunk) {
             if (dlData[kw.keyword]) {
               kw.sparkline = dlData[kw.keyword].ratios;
               kw.trend = dlData[kw.keyword].trend;
             }
           }
         }
-      } catch (e) {
-        console.error('Datalab Error:', e);
+        
+        processed += chunk.length;
+        const progressEl = document.getElementById('api-progress');
+        if (progressEl) progressEl.textContent = `네이버 API 연동 중… (${processed}/${totalKws})`;
+        
+        // Rate Limit (초당 검색광고 5회, 데이터랩 10회 방어) 딜레이
+        await new Promise(r => setTimeout(r, 200));
       }
     }
 
