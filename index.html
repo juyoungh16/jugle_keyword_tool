@@ -20,6 +20,7 @@
   <nav class="nav">
     <div class="nav-label">발굴</div>
     <div class="nav-item active" onclick="showPage('trend')"><span class="icon">📈</span>트렌드 탐색</div>
+    <div class="nav-item" onclick="showPage('discover')"><span class="icon">🔎</span>키워드 발굴</div>
     <div class="nav-item" onclick="showPage('longtail')"><span class="icon">🔍</span>키워드 확장</div>
     <div class="nav-label">활용</div>
     <div class="nav-item" onclick="showPage('strategy')"><span class="icon">🎯</span>콘텐츠 전략</div>
@@ -98,6 +99,72 @@
     </div>
   </div>
   <div id="longtail-result"></div>
+</div>
+
+<!-- ══ 키워드 발굴 ══ -->
+<div id="page-discover" class="page">
+  <div class="page-header">
+    <div class="page-title">🔎 키워드 발굴</div>
+    <div class="page-desc">여러 소스에서 키워드를 추출하고 검색량·경쟁도 기반으로 우선순위를 계산해요.</div>
+  </div>
+
+  <!-- 소스 탭 -->
+  <div class="card" style="padding:0;overflow:hidden">
+    <div class="disc-tab-bar">
+      <button class="disc-tab-btn active" data-tab="product" onclick="selectDiscTab(this)">📄 제품/서비스 자료</button>
+      <button class="disc-tab-btn" data-tab="competitor" onclick="selectDiscTab(this)">🏢 경쟁사 URL</button>
+      <button class="disc-tab-btn" data-tab="owned" onclick="selectDiscTab(this)">🏠 자사 URL</button>
+      <button class="disc-tab-btn" data-tab="news" onclick="selectDiscTab(this)">📰 뉴스 트렌드</button>
+    </div>
+
+    <!-- 제품/서비스 자료 -->
+    <div class="disc-tab-panel active" id="disc-panel-product">
+      <div class="dropzone" id="disc-dropzone"
+        ondragover="event.preventDefault();this.classList.add('drag-over')"
+        ondragleave="this.classList.remove('drag-over')"
+        ondrop="handleDiscDrop(event)"
+        onclick="document.getElementById('disc-file-input').click()">
+        <div class="dropzone-icon">📁</div>
+        <div class="dropzone-text">파일을 드래그하거나 클릭해서 선택</div>
+        <div class="dropzone-sub">PDF, DOCX, PPTX, XLSX, JPEG, PNG</div>
+      </div>
+      <input type="file" id="disc-file-input" accept=".pdf,.docx,.pptx,.xlsx,.jpeg,.jpg,.png" style="display:none" onchange="handleDiscFileSelect(event)">
+      <div id="disc-file-list" style="padding:0 16px"></div>
+      <div style="padding:0 16px 16px">
+        <textarea id="disc-product-text" style="height:80px" placeholder="파일 내용을 보완할 설명이 있으면 입력하세요"></textarea>
+      </div>
+    </div>
+
+    <!-- 경쟁사 URL -->
+    <div class="disc-tab-panel" id="disc-panel-competitor">
+      <div style="padding:16px">
+        <textarea id="disc-competitor-urls" style="height:140px" placeholder="경쟁사 URL을 한 줄에 하나씩 입력하세요&#10;https://example.com/blog"></textarea>
+      </div>
+    </div>
+
+    <!-- 자사 URL -->
+    <div class="disc-tab-panel" id="disc-panel-owned">
+      <div style="padding:16px">
+        <textarea id="disc-owned-urls" style="height:140px" placeholder="자사 URL을 한 줄에 하나씩 입력하세요&#10;https://mysite.com/blog"></textarea>
+      </div>
+    </div>
+
+    <!-- 뉴스 트렌드 -->
+    <div class="disc-tab-panel" id="disc-panel-news">
+      <div style="padding:16px">
+        <textarea id="disc-news-topic" style="height:140px" placeholder="분석할 업계 키워드를 입력하세요 (예: AI 코딩 도구, SaaS)"></textarea>
+      </div>
+    </div>
+
+    <div style="padding:14px 16px;display:flex;gap:8px;align-items:center;border-top:1px solid var(--border)">
+      <button class="btn btn-primary" onclick="discoverKeywords()">🔎 발굴하기</button>
+      <button class="btn btn-secondary btn-sm" onclick="demoDiscover()">데모</button>
+      <button class="btn btn-ghost btn-sm" id="disc-load-prev" onclick="loadPrevDiscoverResult()" style="display:none;margin-left:auto;font-size:11px"></button>
+    </div>
+  </div>
+
+  <!-- 가중치 슬라이더 + 결과 -->
+  <div id="discover-result"></div>
 </div>
 
 <!-- ══ 콘텐츠 전략 ══ -->

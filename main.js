@@ -1136,4 +1136,513 @@ function escStr(s){return s.replace(/'/g,"\\'").replace(/"/g,'&quot;');}
 (function init(){
   const key=getApiKey();
   if(key){document.getElementById('api-key-input').value=key;updateApiStatus(true);}
-  updateSavedBadge();})();
+  updateSavedBadge();
+  // 이전 발굴 결과 복원 버튼 설정
+  _initDiscoverPrevButton();
+})();
+
+// ══════════════════════════════════════════════════════════════
+// 섹션 16: 키워드 발굴 (Discover)
+// ══════════════════════════════════════════════════════════════
+
+// ── 탭 선택 ──
+function selectDiscTab(el) {
+  document.querySelectorAll('.disc-tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.disc-tab-panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  const tab = el.dataset.tab;
+  const panel = document.getElementById('disc-panel-' + tab);
+  if (panel) panel.classList.add('active');
+}
+
+// ── 파일 드롭/선택 ──
+let _discFiles = []; // [{file, name, size}]
+
+function handleDiscDrop(event) {
+  event.preventDefault();
+  document.getElementById('disc-dropzone').classList.remove('drag-over');
+  const files = Array.from(event.dataTransfer.files);
+  _addDiscFiles(files);
+}
+
+function handleDiscFileSelect(event) {
+  const files = Array.from(event.target.files);
+  _addDiscFiles(files);
+  event.target.value = '';
+}
+
+function _addDiscFiles(files) {
+  const allowed = ['pdf','docx','pptx','xlsx','jpg','jpeg','png'];
+  for (const f of files) {
+    const ext = f.name.split('.').pop().toLowerCase();
+    if (!allowed.includes(ext)) { showToast(`${f.name}: 지원하지 않는 형식입니다.`); continue; }
+    if (_discFiles.find(d => d.name === f.name)) continue;
+    _discFiles.push({ file: f, name: f.name, size: f.size });
+  }
+  _renderDiscFileList();
+}
+
+function _removeDiscFile(name) {
+  _discFiles = _discFiles.filter(f => f.name !== name);
+  _renderDiscFileList();
+}
+
+function _renderDiscFileList() {
+  const el = document.getElementById('disc-file-list');
+  if (!el) return;
+  if (!_discFiles.length) { el.innerHTML = ''; return; }
+  el.innerHTML = _discFiles.map(f => `<div class="disc-file-item">
+    <span class="disc-file-name">📎 ${f.name}</span>
+    <span class="disc-file-size">${(f.size/1024).toFixed(0)}KB</span>
+    <button class="disc-file-remove" onclick="_removeDiscFile('${escStr(f.name)}')" title="제거">✕</button>
+  </div>`).join('');
+}
+
+// ── 가중치 상태 ──
+let _discWeightV = 0.6;   // 검색량 가중치
+let _discWeightKD = 0.4;  // KD 가중치 (역산)
+
+function onWeightSlide(val) {
+  _discWeightV = parseFloat(val) / 100;
+  _discWeightKD = 1 - _discWeightV;
+  document.getElementById('disc-weight-pct').textContent =
+    `검색량 ${Math.round(_discWeightV*100)}% / KD ${Math.round(_discWeightKD*100)}%`;
+  _recomputeStars();
+}
+
+// ── 추천도 계산 ──
+function computeDiscScore(kw, maxVolN) {
+  const volScore = maxVolN > 0 ? ((kw.volumeN || 0) / maxVolN * 100) : 0;
+  const kdScore  = 100 - (kw.kd || 50);
+  const srcBonus = (kw.sources || []).length >= 2 ? 5 : 0;
+  return Math.round(volScore * _discWeightV + kdScore * _discWeightKD + srcBonus);
+}
+
+function _starsHtml(score) {
+  const filled = Math.round(score / 20); // 100점 → 5개
+  return '<span class="star-score">' +
+    '★'.repeat(Math.max(0, filled)) +
+    '<span class="empty">' + '★'.repeat(5 - Math.max(0, filled)) + '</span>' +
+    '</span>';
+}
+
+let _lastDiscKeywords = []; // 마지막 결과 캐싱
+
+function _recomputeStars() {
+  if (!_lastDiscKeywords.length) return;
+  const maxVolN = Math.max(..._lastDiscKeywords.map(k => k.volumeN || 0), 1);
+  document.querySelectorAll('#disc-result-table tbody tr').forEach(row => {
+    const kw = _lastDiscKeywords.find(k => k.keyword === row.dataset.keyword);
+    if (!kw) return;
+    kw.score = computeDiscScore(kw, maxVolN);
+    row.dataset.score = kw.score;
+    const starCell = row.querySelector('.disc-star-cell');
+    if (starCell) starCell.innerHTML = _starsHtml(kw.score);
+  });
+}
+
+// ── 메인 파이프라인 ──
+async function discoverKeywords() {
+  const activeTab = document.querySelector('.disc-tab-btn.active')?.dataset.tab || 'product';
+  const result = document.getElementById('discover-result');
+  result.innerHTML = `<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text" id="disc-prog">소스 분석 중…</div></div></div>`;
+
+  let extractedText = '';
+  let sourceLabel = '';
+  let urlSources = []; // [{url, label}]
+  let articles = [];
+
+  try {
+    if (activeTab === 'product') {
+      sourceLabel = 'AI';
+      const textArea = document.getElementById('disc-product-text').value.trim();
+      let fileTexts = '';
+      for (const df of _discFiles) {
+        const ext = df.name.split('.').pop().toLowerCase();
+        if (['jpg','jpeg','png'].includes(ext)) {
+          // Vision API 경유
+          const b64 = await _fileToBase64(df.file);
+          fileTexts += `\n[이미지: ${df.name}]\n`;
+          // 이미지는 별도로 Claude Vision으로 처리
+          const visionText = await _extractImageText(b64, df.name);
+          fileTexts += visionText;
+        } else {
+          const fd = new FormData();
+          fd.append('file', df.file, df.name);
+          _setDiscProg(`파일 분석 중: ${df.name}…`);
+          try {
+            const r = await fetch('/.netlify/functions/extract-file', { method: 'POST', body: fd });
+            if (r.ok) { const d = await r.json(); fileTexts += d.text || ''; }
+          } catch(e) {}
+        }
+      }
+      extractedText = fileTexts + (textArea ? '\n' + textArea : '');
+    }
+
+    else if (activeTab === 'competitor' || activeTab === 'owned') {
+      const isComp = activeTab === 'competitor';
+      sourceLabel = isComp ? '경' : '자';
+      const rawUrls = (document.getElementById(isComp ? 'disc-competitor-urls' : 'disc-owned-urls').value || '').trim();
+      const urls = rawUrls.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+      if (!urls.length) { result.innerHTML = `<div class="card"><div class="stream-box">URL을 한 줄에 하나씩 입력해주세요.</div></div>`; return; }
+
+      for (const url of urls.slice(0, 5)) {
+        _setDiscProg(`크롤링 중: ${url.slice(0, 50)}…`);
+        try {
+          const r = await fetch('/.netlify/functions/crawl-url', {
+            method: 'POST', body: JSON.stringify({ url }),
+            headers: { 'Content-Type': 'application/json' }
+          });
+          if (r.ok) {
+            const d = await r.json();
+            if (d.text) {
+              extractedText += d.text + '\n---\n';
+              urlSources.push({ url, label: isComp ? '[경쟁사]' : '[자사]' });
+            }
+          }
+        } catch(e) {}
+      }
+    }
+
+    else if (activeTab === 'news') {
+      sourceLabel = '뉴';
+      const topic = document.getElementById('disc-news-topic').value.trim() || 'IT/테크';
+      _setDiscProg('뉴스 RSS 수집 중…');
+      try {
+        const r = await fetch('/.netlify/functions/news-rss', {
+          method: 'POST', body: JSON.stringify({ topic }),
+          headers: { 'Content-Type': 'application/json' }
+        });
+        if (r.ok) {
+          const d = await r.json();
+          articles = d.articles || [];
+          extractedText = articles.map(a => `[${a.title}]\n${a.summary}`).join('\n\n');
+        }
+      } catch(e) {}
+    }
+
+    if (!extractedText && !articles.length) {
+      result.innerHTML = `<div class="card"><div class="stream-box">분석할 내용이 없습니다. 파일이나 URL, 키워드를 입력해주세요.</div></div>`;
+      return;
+    }
+
+    // AI 키워드 추출
+    _setDiscProg('AI로 키워드 추출 중…');
+    const aiPrompt = `당신은 IT/테크 SEO 전문가입니다. 아래 텍스트에서 콘텐츠 마케팅에 활용할 수 있는 핵심 키워드를 30개 추출해주세요.
+
+텍스트:
+${extractedText.slice(0, 4000)}
+
+반드시 JSON만 출력하세요 (설명 없이):
+{"keywords":[{"keyword":"키워드","intent":"인지|고려|전환","reason":"선정 이유 15자 이내"}]}
+- intent: (가격|신청|구매|다운|설치) → 전환, (추천|비교|후기|차이|리뷰) → 고려, 나머지 → 인지`;
+
+    const aiResp = await callClaude(aiPrompt);
+    if (!aiResp) return;
+    let rawKws = [];
+    try {
+      const parsed = JSON.parse(aiResp.replace(/```json|```/g, '').trim());
+      rawKws = parsed.keywords || [];
+    } catch(e) {
+      result.innerHTML = `<div class="card"><div class="stream-box">AI 응답 파싱 오류: ${aiResp.slice(0,300)}</div></div>`;
+      return;
+    }
+
+    // 키워드 객체 구성
+    const keywords = rawKws.map(k => ({
+      keyword: k.keyword,
+      intent: k.intent || '인지',
+      reason: k.reason || '',
+      sources: [sourceLabel].filter(Boolean),
+      volumeN: 0, volumeG: 0, kd: null,
+      urlSources,
+      articles: articles.slice(0, 5)
+    }));
+
+    // 네이버 검색량 병렬 조회 (5개씩)
+    _setDiscProg('네이버 검색량 조회 중…');
+    const kwChunks = [];
+    for (let i = 0; i < keywords.length; i += 5) kwChunks.push(keywords.slice(i, i + 5));
+    for (const chunk of kwChunks) {
+      const hints = chunk.map(k => k.keyword.replace(/[^a-zA-Z0-9가-힣\s]/g, '')).filter(Boolean).join(',');
+      if (!hints) continue;
+      try {
+        const r = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(hints)}`);
+        if (r.ok) {
+          const d = await r.json();
+          for (const kw of chunk) {
+            const match = (d.keywordList || []).find(k => k.relKeyword.replace(/ /g,'') === kw.keyword.replace(/ /g,''));
+            if (match) {
+              kw.volumeN = (typeof match.monthlyPcQcCnt === 'number' ? match.monthlyPcQcCnt : 10)
+                         + (typeof match.monthlyMobileQcCnt === 'number' ? match.monthlyMobileQcCnt : 10);
+            }
+          }
+        }
+      } catch(e) {}
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    // DataForSEO 구글 검색량 + KD
+    _setDiscProg('Google 데이터 조회 중…');
+    try {
+      const dfsRes = await fetch('/.netlify/functions/dataforseo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keywords: keywords.map(k => k.keyword) })
+      });
+      if (dfsRes.ok) {
+        const dfsData = await dfsRes.json();
+        for (const kw of keywords) {
+          const d = dfsData[kw.keyword];
+          if (d) { kw.volumeG = d.volume_g || 0; kw.kd = d.kd || null; }
+        }
+      }
+    } catch(e) {}
+
+    // DataForSEO SERP (상위 10개 키워드만)
+    _setDiscProg('Google SERP 조회 중…');
+    try {
+      const topKws = [...keywords].sort((a,b) => b.volumeN - a.volumeN).slice(0, 10).map(k => k.keyword);
+      const serpRes = await fetch('/.netlify/functions/dataforseo-serp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keywords: topKws })
+      });
+      if (serpRes.ok) {
+        const serpData = await serpRes.json();
+        for (const kw of keywords) {
+          if (serpData[kw.keyword]) {
+            kw.serpItems = serpData[kw.keyword];
+            kw.sources = [...new Set([...kw.sources, '구'])];
+          }
+        }
+      }
+    } catch(e) {}
+
+    // 추천도 계산
+    const maxVolN = Math.max(...keywords.map(k => k.volumeN), 1);
+    keywords.forEach(kw => { kw.score = computeDiscScore(kw, maxVolN); });
+    keywords.sort((a, b) => b.volumeN - a.volumeN);
+
+    _lastDiscKeywords = keywords;
+    _cacheDiscoverResult(keywords);
+    renderDiscoverTable(keywords);
+
+  } catch(e) {
+    result.innerHTML = `<div class="card"><div class="stream-box">오류: ${e.message}</div></div>`;
+  }
+}
+
+function _setDiscProg(msg) {
+  const el = document.getElementById('disc-prog');
+  if (el) el.textContent = msg;
+}
+
+// ── 이미지 텍스트 추출 (Claude Vision) ──
+async function _fileToBase64(file) {
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result.split(',')[1]);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function _extractImageText(base64, name) {
+  const apiKey = getApiKey();
+  if (!apiKey) return '';
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+          { type: 'text', text: '이 이미지에서 텍스트나 중요한 정보를 모두 추출해주세요. 키워드 발굴에 활용할 예정입니다.' }
+        ]}]
+      })
+    });
+    if (res.ok) { const d = await res.json(); return d.content?.[0]?.text || ''; }
+    return '';
+  } catch(e) { return ''; }
+}
+
+// ── 결과 테이블 렌더링 ──
+function renderDiscoverTable(keywords) {
+  const result = document.getElementById('discover-result');
+  if (!keywords || !keywords.length) {
+    result.innerHTML = `<div class="card"><div class="stream-box">발굴된 키워드가 없습니다.</div></div>`;
+    return;
+  }
+
+  const TID = 'disc-result-table';
+
+  // 가중치 슬라이더 HTML
+  const sliderHtml = `<div class="weight-bar">
+    <span class="info-tip" data-tip="검색량과 KD 중 어느 쪽을 더 중시할지 결정해요.\n신규 사이트는 KD를 높게, 큰 사이트는 검색량을 높게 설정 권장.\n조절 시 추천도가 실시간으로 재계산돼요.">ⓘ</span>
+    <span class="weight-label">검색량 우선</span>
+    <input type="range" class="weight-slider" min="10" max="90" value="${Math.round(_discWeightV*100)}" oninput="onWeightSlide(this.value)">
+    <span class="weight-label">KD 우선</span>
+    <span class="weight-pct" id="disc-weight-pct">검색량 ${Math.round(_discWeightV*100)}% / KD ${Math.round(_discWeightKD*100)}%</span>
+  </div>`;
+
+  // 테이블 헤더
+  const thead = `<thead><tr>
+    <th style="width:36px"><input type="checkbox" class="th-checkbox" id="master-cb-${TID}" onchange="toggleAllRows('${TID}',this)"></th>
+    <th>키워드</th>
+    <th style="width:70px">의도</th>
+    <th class="sortable" style="width:110px" onclick="sortDiscTable('volumeN',this)"><span class="info-tip" data-tip="네이버 검색광고 API 기반 월간 PC+모바일 합산 검색량.\n실제 검색 로그 기반 절댓값.">ⓘ</span>검색량(N) <span class="sort-icon">↕</span></th>
+    <th class="sortable" style="width:110px" onclick="sortDiscTable('volumeG',this)"><span class="info-tip" data-tip="DataForSEO를 통해 가져온 구글 월간 검색량 절댓값.">ⓘ</span>검색량(G) <span class="sort-icon">↕</span></th>
+    <th class="sortable" style="width:100px" onclick="sortDiscTable('kd',this)"><span class="info-tip" data-tip="DataForSEO가 구글 1페이지 상위 10개 결과의\n백링크·도메인 권위도·SERP 특성을 실제 크롤링해서 산출한 경쟁도.\n🟢 0~30 진입 가능 / 🟡 31~60 중간 경쟁 / 🔴 61~100 진입 어려움">ⓘ</span>KD <span class="sort-icon">↕</span></th>
+    <th style="width:100px">소스</th>
+    <th class="sortable" style="width:90px" onclick="sortDiscTable('score',this)"><span class="info-tip" data-tip="추천도 = 검색량 점수 × 가중치A + KD 점수 × 가중치B + 소스 보너스\n소스 보너스: +5점 (2개 이상 소스에서 중복 발굴 시)\n가중치 슬라이더로 검색량/KD 비율을 직접 조절할 수 있어요.">ⓘ</span>추천도 <span class="sort-icon">↕</span></th>
+    <th style="width:36px"></th>
+  </tr></thead>`;
+
+  // 행 렌더링
+  const maxVolN = Math.max(...keywords.map(k => k.volumeN || 0), 1);
+
+  const rows = keywords.map(kw => {
+    const isSaved = savedKeywords.some(s => s.keyword === kw.keyword);
+    const kdClass = kw.kd === null ? '' : kw.kd <= 30 ? 'kd-low' : kw.kd <= 60 ? 'kd-mid' : 'kd-high';
+    const kdHtml = kw.kd !== null ? `<span class="kd-dot ${kdClass}"></span>${kw.kd}` : '-';
+    const volNHtml = kw.volumeN > 0 ? fmtVol(kw.volumeN) : '-';
+    const volGHtml = kw.volumeG > 0 ? fmtVol(kw.volumeG) : '-';
+
+    // 소스 배지
+    const srcMap = { '경': '경쟁사', '자': '자사', '뉴': '뉴스', '구': 'Google', 'AI': 'AI 자료' };
+    const srcBadges = (kw.sources || []).map(s => {
+      let tipContent = '';
+      if (s === '경' || s === '자') {
+        const items = (kw.urlSources || []).slice(0, 5).map(u => `<a href="${u.url}" target="_blank">${u.label}: ${u.url.slice(0,40)}</a>`).join('');
+        tipContent = items || srcMap[s];
+      } else if (s === '뉴') {
+        const items = (kw.articles || []).slice(0, 5).map(a => `<a href="${a.url||'#'}" target="_blank">${a.title}</a>`).join('');
+        tipContent = items || '뉴스 기사';
+      } else if (s === '구') {
+        const items = (kw.serpItems || []).slice(0, 5).map(i => `<a href="${i.url}" target="_blank">${i.title.slice(0,40)}</a>`).join('');
+        tipContent = items || 'Google SERP';
+      } else if (s === 'AI') {
+        tipContent = '제품/서비스 자료 기반 AI 추출';
+      }
+      return `<span class="src-badge src-${s}">${s}<span class="src-badge-tip">${tipContent}</span></span>`;
+    }).join('');
+
+    return `<tr data-keyword="${escStr(kw.keyword)}" data-volume="${kw.volumeN}" data-score="${kw.score||0}" data-kd="${kw.kd||0}" data-volumeG="${kw.volumeG}" data-intent="${kw.intent}">
+      <td><input type="checkbox" class="row-checkbox" onchange="toggleRow('${TID}',this)"></td>
+      <td class="keyword-cell">${kw.keyword}</td>
+      <td>${intentPill(kw.intent)}</td>
+      <td class="num-cell">${volNHtml}</td>
+      <td class="num-cell">${volGHtml}</td>
+      <td style="white-space:nowrap">${kdHtml}</td>
+      <td><div class="src-badges">${srcBadges}</div></td>
+      <td class="disc-star-cell">${_starsHtml(kw.score||0)}</td>
+      <td>${makeKebab('d'+keywords.indexOf(kw), kw.keyword, kw.intent, '키워드발굴', isSaved)}</td>
+    </tr>`;
+  }).join('');
+
+  result.innerHTML = `
+    ${sliderHtml}
+    <div class="result-summary">
+      <span>총 <strong>${keywords.length}개</strong> 키워드 발굴</span>
+      <div class="result-actions">
+        <button class="btn btn-secondary btn-sm" id="sel-compare-btn-${TID}" onclick="compareSelected('${TID}')" disabled style="opacity:0.4">⚖️ 비교 (<span id="sel-count-${TID}">0</span>)</button>
+        <button class="btn btn-secondary btn-sm" id="sel-save-btn-${TID}" onclick="saveSelected('${TID}')" disabled style="opacity:0.4">💾 선택 저장</button>
+        <button class="btn btn-secondary btn-sm" onclick="saveAllVisible('${TID}')">+ 전체 저장</button>
+      </div>
+    </div>
+    <div class="kw-table-wrap">
+      <table class="kw-table" id="${TID}">
+        ${thead}
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+// ── 테이블 정렬 ──
+let _discSortCol = 'volumeN', _discSortDir = 'desc';
+
+function sortDiscTable(col, th) {
+  const table = document.getElementById('disc-result-table');
+  if (!table) return;
+  const tbody = table.querySelector('tbody');
+  const dir = _discSortCol === col && _discSortDir === 'desc' ? 'asc' : 'desc';
+  _discSortCol = col; _discSortDir = dir;
+
+  // 헤더 아이콘 업데이트
+  table.querySelectorAll('th.sortable').forEach(t => {
+    t.classList.remove('sort-asc', 'sort-desc');
+    t.querySelector('.sort-icon').textContent = '↕';
+  });
+  if (th) {
+    th.classList.add('sort-' + dir);
+    th.querySelector('.sort-icon').textContent = dir === 'asc' ? '↑' : '↓';
+  }
+
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort((a, b) => {
+    const colMap = { volumeN: 'volume', volumeG: 'volumeG', kd: 'kd', score: 'score' };
+    const attr = colMap[col] || col;
+    const av = parseFloat(a.dataset[attr] || 0);
+    const bv = parseFloat(b.dataset[attr] || 0);
+    return dir === 'asc' ? av - bv : bv - av;
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+// ── 결과 캐싱 ──
+function _cacheDiscoverResult(keywords) {
+  const payload = { keywords, savedAt: Date.now() };
+  try {
+    sessionStorage.setItem('jugle_discover_session', JSON.stringify(payload));
+    localStorage.setItem('jugle_discover_cache', JSON.stringify(payload));
+  } catch(e) {}
+}
+
+function _initDiscoverPrevButton() {
+  const btn = document.getElementById('disc-load-prev');
+  if (!btn) return;
+  try {
+    const cached = localStorage.getItem('jugle_discover_cache');
+    if (!cached) return;
+    const { keywords, savedAt } = JSON.parse(cached);
+    const daysDiff = Math.round((Date.now() - savedAt) / 86400000);
+    if (daysDiff > 7) { localStorage.removeItem('jugle_discover_cache'); return; }
+    btn.style.display = 'inline-flex';
+    btn.textContent = `🕐 지난 결과 불러오기 (${daysDiff === 0 ? '오늘' : daysDiff + '일 전'})`;
+  } catch(e) {}
+}
+
+function loadPrevDiscoverResult() {
+  try {
+    const cached = localStorage.getItem('jugle_discover_cache');
+    if (!cached) return;
+    const { keywords } = JSON.parse(cached);
+    _lastDiscKeywords = keywords;
+    renderDiscoverTable(keywords);
+    showToast('이전 발굴 결과를 불러왔어요.');
+  } catch(e) {}
+}
+
+// ── 데모 ──
+function demoDiscover() {
+  const demoKws = [
+    { keyword: 'AI 코딩 도구', intent: '고려', volumeN: 49500, volumeG: 33100, kd: 42, sources: ['AI', '뉴'], reason: '급성장 시장 트렌드', urlSources: [], articles: [{title: 'AI 코딩 도구 시장 분석', url: 'https://example.com/1', summary: ''}], score: 0 },
+    { keyword: 'Cursor AI', intent: '인지', volumeN: 27100, volumeG: 18200, kd: 28, sources: ['경', 'AI'], reason: '경쟁사 주요 키워드', urlSources: [{url: 'https://competitor.com/cursor-ai', label: '[경쟁사]'}], articles: [], serpItems: [{title: 'Cursor AI 완벽 가이드', url: 'https://google.com/1'}], score: 0 },
+    { keyword: 'GitHub Copilot 비교', intent: '고려', volumeN: 22000, volumeG: 14400, kd: 35, sources: ['경', '뉴'], reason: '비교 검색 다수', urlSources: [], articles: [{title: 'Copilot vs Cursor 비교', url: 'https://news.com/1', summary: ''}], score: 0 },
+    { keyword: 'AI 코딩 가격', intent: '전환', volumeN: 18200, volumeG: 12100, kd: 18, sources: ['자', 'AI'], reason: '전환 의도 명확', urlSources: [{url: 'https://mysite.com/pricing', label: '[자사]'}], articles: [], score: 0 },
+    { keyword: '프롬프트 엔지니어링', intent: '인지', volumeN: 14400, volumeG: 9900, kd: 55, sources: ['뉴'], reason: '업계 급상승 키워드', urlSources: [], articles: [{title: '프롬프트 엔지니어링 입문', url: 'https://news.com/2', summary: ''}], score: 0 },
+    { keyword: 'Claude API 사용법', intent: '인지', volumeN: 12100, volumeG: 8100, kd: 32, sources: ['AI', '뉴'], reason: '공식 자료 핵심어', urlSources: [], articles: [], score: 0 },
+    { keyword: 'LLM 비교', intent: '고려', volumeN: 9900, volumeG: 6600, kd: 48, sources: ['경'], reason: '경쟁사 랜딩 키워드', urlSources: [{url: 'https://competitor.com/llm', label: '[경쟁사]'}], articles: [], score: 0 },
+    { keyword: 'AI 개발 스택', intent: '인지', volumeN: 8100, volumeG: 5500, kd: 40, sources: ['자'], reason: '자사 블로그 키워드', urlSources: [{url: 'https://mysite.com/stack', label: '[자사]'}], articles: [], score: 0 },
+    { keyword: 'RAG 구현', intent: '인지', volumeN: 6600, volumeG: 4400, kd: 62, sources: ['뉴', '구'], reason: '기술 트렌드', urlSources: [], articles: [], serpItems: [{title: 'RAG 구현 완벽 가이드', url: 'https://google.com/rag'}], score: 0 },
+    { keyword: 'LangChain 튜토리얼', intent: '인지', volumeN: 5500, volumeG: 3300, kd: 38, sources: ['경', '뉴'], reason: '프레임워크 학습 수요', urlSources: [], articles: [{title: 'LangChain 입문', url: 'https://news.com/3', summary: ''}], score: 0 },
+  ];
+  const maxVolN = Math.max(...demoKws.map(k => k.volumeN), 1);
+  demoKws.forEach(k => { k.score = computeDiscScore(k, maxVolN); });
+  _lastDiscKeywords = demoKws;
+  renderDiscoverTable(demoKws);
+  showToast('데모 데이터를 불러왔어요.');
+}
+
