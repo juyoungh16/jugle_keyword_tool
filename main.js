@@ -258,48 +258,49 @@ async function expandLongtail(){
   const seeds=document.getElementById('seed-keyword').value.trim();
   if(!seeds){alert('씨앗 키워드를 입력해주세요.');return;}
   const result=document.getElementById('longtail-result');
-  result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">네이버 검색광고 API에서 "${seeds}" 연관 키워드 조회 중…</div></div></div>`;
-  
+  result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text" id="lt-prog">네이버 검색광고 API에서 "${seeds}" 연관 키워드 조회 중…</div></div></div>`;
+  const setLtProg = msg => { const el=document.getElementById('lt-prog'); if(el) el.textContent=msg; };
+
   try {
     // 쉼표로 나눈 첫 번째 키워드를 사용하되 특수문자는 제거 (네이버 검색광고 API 에러 방지)
     const rawKeyword = seeds.split(',')[0].trim();
     const hintKeyword = rawKeyword.replace(/[^a-zA-Z0-9가-힣\s]/g, '');
     const res = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(hintKeyword)}`);
-    
+
     if (!res.ok) {
       const errInfo = await res.json();
       throw new Error(errInfo.error || 'API 연동 오류');
     }
-    
+
     const data = await res.json();
     if (!data.keywordList || data.keywordList.length === 0) {
       result.innerHTML = `<div class="card"><div class="text-xs">관련 키워드가 없습니다.</div></div>`;
       return;
     }
-    
+
     // 네이버 검색광고 API 결과 가공 (최대 40개)
+    // kdSource: 'naver' = 네이버 compIdx 기반 추정, 'google' = DataForSEO 실데이터
+    const compMap = {'높음': 80, '중간': 50, '낮음': 20};
     const keywords = data.keywordList.slice(0, 40).map(k => {
-      // 10 미만 값('< 10' 등 문자열)은 숫자 10으로 취급
       const pc = typeof k.monthlyPcQcCnt === 'number' ? k.monthlyPcQcCnt : 10;
       const mo = typeof k.monthlyMobileQcCnt === 'number' ? k.monthlyMobileQcCnt : 10;
       const vol = pc + mo;
-      
-      const compMap = {'높음': 80, '중간': 50, '낮음': 20};
-      const kd = compMap[k.compIdx] || 50;
-      
+      const kdNaver = compMap[k.compIdx] || 50;
+
       // 인텐트 규칙 기반 판단 (AI 추론 대신)
       let intent = '인지';
       const kw = k.relKeyword;
       if (/(가격|비용|신청|다운|할인|구매|가입|예약|판매|견적)/.test(kw)) intent = '전환';
       else if (/(추천|비교|후기|차이|순위|리뷰|장단점|베스트)/.test(kw)) intent = '고려';
-      
-      return { keyword: kw, intent, volume: vol, kd };
+
+      return { keyword: kw, intent, volume: vol, kd: kdNaver, kdSource: 'naver', volumeG: 0 };
     });
-    
+
     // 검색량 순 정렬
     keywords.sort((a, b) => b.volume - a.volume);
-    
-    // 데이터랩 API 연동 (12주 트렌드 스파크라인 및 방향)
+
+    // ── 1단계: 네이버 데이터랩 스파크라인 ──────────────────────
+    setLtProg('네이버 트렌드 데이터 조회 중…');
     try {
       const dlRes = await fetch('/.netlify/functions/naver-datalab', {
         method: 'POST',
@@ -317,7 +318,28 @@ async function expandLongtail(){
     } catch(e) {
       console.error('Datalab Error in expandLongtail:', e);
     }
-    
+
+    // ── 2단계: DataForSEO 구글 KD + 검색량 (실데이터 교체) ─────
+    setLtProg('DataForSEO Google KD 조회 중…');
+    try {
+      const dfsRes = await fetch('/.netlify/functions/dataforseo', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keywords: keywords.map(k => k.keyword) })
+      });
+      if (dfsRes.ok) {
+        const dfsData = await dfsRes.json();
+        for (const kw of keywords) {
+          const d = dfsData[kw.keyword];
+          if (d) {
+            if (d.kd > 0) { kw.kd = d.kd; kw.kdSource = 'google'; }
+            if (d.volume_g > 0) kw.volumeG = d.volume_g;
+          }
+        }
+      }
+    } catch(e) {
+      console.error('DataForSEO KD Error in expandLongtail:', e);
+    }
+
     renderLongtailTable({ keywords }, seeds);
   } catch(e) {
     result.innerHTML=`<div class="card"><div class="stream-box">오류: ${e.message}<br><br>※ Netlify 환경변수(NAVER_API_KEY, NAVER_SECRET_KEY, NAVER_CUSTOMER_ID)가 정상적으로 설정되었는지 확인하세요.</div></div>`;
@@ -329,13 +351,23 @@ function renderLongtailTable(data,seeds){
   const result=document.getElementById('longtail-result');
   const kws=data.keywords||[];
   tableIntentFilter[TID]=null;
+
+  // 인텐트 집계
   const counts={'인지':0,'고려':0,'전환':0};
   kws.forEach(k=>{if(counts[k.intent]!==undefined) counts[k.intent]++;});
+
+  // KD 실데이터 vs 추정 집계
+  const realKdCount = kws.filter(k => k.kdSource === 'google').length;
+  const kdBadge = realKdCount > 0
+    ? `<span class="text-xs" style="color:var(--green);background:var(--green-lt);padding:2px 7px;border-radius:4px;border:1px solid #BBF7D0;">✅ KD 실데이터 ${realKdCount}/${kws.length}</span>`
+    : `<span class="text-xs" style="color:var(--amber);background:var(--amber-lt);padding:2px 7px;border-radius:4px;border:1px solid #FDE68A;">⚠️ KD 추정값 (DataForSEO 미설정)</span>`;
+
   let html=`
     <div class="result-summary">
       <span>🌱 <strong>"${seeds}"</strong> 확장 · 총 <strong>${kws.length}개</strong></span>
       <span>${Object.entries(counts).filter(([,v])=>v>0).map(([k,v])=>`<span class="intent-pill ${INTENTS[k].cls}">${k} ${v}</span>`).join(' ')}</span>
-      <span class="text-xs" style="color:var(--green);background:var(--green-lt);padding:2px 7px;border-radius:4px;border:1px solid #BBF7D0;">✅ 실제 검색량</span>
+      <span class="text-xs" style="color:var(--green);background:var(--green-lt);padding:2px 7px;border-radius:4px;border:1px solid #BBF7D0;">✅ 실제 검색량(N)</span>
+      ${kdBadge}
       <div class="result-actions">
         <button class="btn btn-secondary btn-sm" id="sel-step3-btn-${TID}" onclick="sendLongtailToStrategy(false)" disabled style="opacity:0.4">→ STEP 3 클러스터 (<span id="sel-count-${TID}">0</span>)</button>
         <button class="btn btn-primary btn-sm" onclick="sendLongtailToStrategy(true)">전체 → STEP 3</button>
@@ -346,22 +378,29 @@ function renderLongtailTable(data,seeds){
       <thead>${makeTableHeader(TID,[
         {label:'키워드',key:'keyword'},
         {label:'의도',key:'intent'},
-        {label:'Volume',key:'volume',sortable:true,width:'110px'},
-        {label:'추이',key:'trend',sortable:false,width:'120px'},
-        {label:'경쟁도',key:'kd',sortable:true,width:'150px'},
+        {label:'검색량(N)',key:'volume',sortable:true,width:'100px'},
+        {label:'검색량(G)',key:'volumeG',sortable:true,width:'100px'},
+        {label:'추이',key:'trend',sortable:false,width:'100px'},
+        {label:'KD (Google)',key:'kd',sortable:true,width:'140px'},
       ])}</thead>
       <tbody id="lt-tbody">`;
+
   kws.forEach((kw,idx)=>{
     const sparkColor={'인지':'#0284C7','고려':'#CA8A04','전환':'#16A34A'}[kw.intent] || '#64748B';
     const trendHtml = kw.sparkline ? `<div style="display:flex;align-items:center;gap:6px">${makeSparkline(kw.sparkline, sparkColor)}</div>` : '-';
+    const volGHtml = kw.volumeG > 0 ? fmtVol(kw.volumeG) : '-';
+    const kdHtml = kw.kdSource === 'google'
+      ? kdBar(kw.kd)
+      : `${kdBar(kw.kd)}<span title="네이버 경쟁도 기반 추정" style="font-size:9px;color:var(--text3);margin-left:3px">추정</span>`;
 
-    html+=`<tr data-volume="${kw.volume}" data-kd="${kw.kd}" data-intent="${kw.intent}">
+    html+=`<tr data-volume="${kw.volume}" data-volume-g="${kw.volumeG||0}" data-kd="${kw.kd}" data-intent="${kw.intent}">
       <td><input type="checkbox" class="row-checkbox" onchange="toggleRow('${TID}',this)"></td>
       <td class="keyword-cell">${kw.keyword}</td>
       <td>${intentPill(kw.intent,TID,idx)}</td>
       <td class="num-cell">${fmtVol(kw.volume)}</td>
+      <td class="num-cell">${volGHtml}</td>
       <td style="padding:6px 12px;">${trendHtml}</td>
-      <td>${kdBar(kw.kd)}</td>
+      <td>${kdHtml}</td>
       <td>${makeKebab('l'+idx,kw.keyword)}</td>
     </tr>`;
   });
@@ -372,18 +411,18 @@ function renderLongtailTable(data,seeds){
 function demoLongtail(){
   document.getElementById('seed-keyword').value='AI 코딩 도구';
   renderLongtailTable({keywords:[
-    {keyword:'AI 코딩 도구란',intent:'인지',volume:8100,kd:25},
-    {keyword:'AI 코딩 도구 추천',intent:'고려',volume:18200,kd:38},
-    {keyword:'AI 코딩 도구 비교',intent:'고려',volume:12100,kd:42},
-    {keyword:'AI 코딩 도구 무료',intent:'고려',volume:9900,kd:30},
-    {keyword:'Cursor vs GitHub Copilot',intent:'고려',volume:14400,kd:45},
-    {keyword:'AI 코딩 도구 사용법',intent:'인지',volume:6600,kd:28},
-    {keyword:'개발자 AI 도구 추천',intent:'고려',volume:22000,kd:35},
-    {keyword:'AI 코딩 도구 단점',intent:'인지',volume:4400,kd:22},
-    {keyword:'AI 코딩 생산성 효과',intent:'인지',volume:5500,kd:32},
-    {keyword:'Copilot 구독 가격',intent:'전환',volume:16500,kd:18},
-    {keyword:'Cursor AI 다운로드',intent:'전환',volume:27100,kd:15},
-    {keyword:'AI 코딩 도구 스타트업',intent:'고려',volume:3300,kd:20},
+    {keyword:'AI 코딩 도구란',intent:'인지',volume:8100,volumeG:5400,kd:25,kdSource:'google'},
+    {keyword:'AI 코딩 도구 추천',intent:'고려',volume:18200,volumeG:12300,kd:38,kdSource:'google'},
+    {keyword:'AI 코딩 도구 비교',intent:'고려',volume:12100,volumeG:8800,kd:42,kdSource:'google'},
+    {keyword:'AI 코딩 도구 무료',intent:'고려',volume:9900,volumeG:6600,kd:30,kdSource:'google'},
+    {keyword:'Cursor vs GitHub Copilot',intent:'고려',volume:14400,volumeG:9900,kd:45,kdSource:'google'},
+    {keyword:'AI 코딩 도구 사용법',intent:'인지',volume:6600,volumeG:0,kd:28,kdSource:'naver'},
+    {keyword:'개발자 AI 도구 추천',intent:'고려',volume:22000,volumeG:14800,kd:35,kdSource:'google'},
+    {keyword:'AI 코딩 도구 단점',intent:'인지',volume:4400,volumeG:0,kd:22,kdSource:'naver'},
+    {keyword:'AI 코딩 생산성 효과',intent:'인지',volume:5500,volumeG:3300,kd:32,kdSource:'google'},
+    {keyword:'Copilot 구독 가격',intent:'전환',volume:16500,volumeG:11000,kd:18,kdSource:'google'},
+    {keyword:'Cursor AI 다운로드',intent:'전환',volume:27100,volumeG:18200,kd:15,kdSource:'google'},
+    {keyword:'AI 코딩 도구 스타트업',intent:'고려',volume:3300,volumeG:0,kd:20,kdSource:'naver'},
   ]},'AI 코딩 도구');
 }
 
@@ -567,6 +606,23 @@ async function callClaude(prompt){
 }
 
 // ── API 키 / 백업 ────────────────────────────────────────────
+// DataForSEO 키 (로컬 저장 — Netlify 환경변수 설정 안내용)
+function saveDfsKeys(){
+  const id=document.getElementById('dfs-id-input').value.trim();
+  const secret=document.getElementById('dfs-secret-input').value.trim();
+  if(!id||!secret){showMsg('settings-msg','ID와 Secret을 모두 입력해주세요.','warning');return;}
+  localStorage.setItem('jugle_dfs_id',id);
+  localStorage.setItem('jugle_dfs_secret',secret);
+  showMsg('settings-msg','✅ DataForSEO 키 저장 완료! Netlify 환경변수에도 동일하게 설정해주세요.','success');
+}
+function clearDfsKeys(){
+  localStorage.removeItem('jugle_dfs_id');localStorage.removeItem('jugle_dfs_secret');
+  document.getElementById('dfs-id-input').value='';document.getElementById('dfs-secret-input').value='';
+}
+function toggleDfsVisibility(which){
+  const input=document.getElementById(which==='id'?'dfs-id-input':'dfs-secret-input');
+  input.type=input.type==='password'?'text':'password';
+}
 function getApiKey(){return localStorage.getItem('jugle_api_key')||'';}
 function saveApiKey(){const key=document.getElementById('api-key-input').value.trim();if(!key.startsWith('sk-ant')){showMsg('settings-msg','올바른 API 키 형식이 아니에요.','warning');return;}localStorage.setItem('jugle_api_key',key);updateApiStatus(true);showMsg('settings-msg','✅ API 키가 저장됐어요!','success');}
 function clearApiKey(){localStorage.removeItem('jugle_api_key');document.getElementById('api-key-input').value='';updateApiStatus(false);}
@@ -580,6 +636,10 @@ function escStr(s){return s.replace(/'/g,"\\'").replace(/"/g,'&quot;');}
 (function init(){
   const key=getApiKey();
   if(key){document.getElementById('api-key-input').value=key;updateApiStatus(true);}
+  const dfsId=localStorage.getItem('jugle_dfs_id');
+  const dfsSecret=localStorage.getItem('jugle_dfs_secret');
+  if(dfsId) document.getElementById('dfs-id-input').value=dfsId;
+  if(dfsSecret) document.getElementById('dfs-secret-input').value=dfsSecret;
   _initDiscoverPrevButton();
 })();
 
@@ -640,46 +700,59 @@ function _renderDiscFileList() {
   </div>`).join('');
 }
 
-// ── 가중치 상태 ──
-let _discWeightV = 0.6;   // 검색량 가중치
-let _discWeightKD = 0.4;  // KD 가중치 (역산)
+// ── 가중치 상태 (α=기회, β=진입, γ=신호) ──
+let _wAlpha = 50, _wBeta = 30, _wGamma = 20; // raw 0-100 합산 정규화
 
-function onWeightSlide(val) {
-  _discWeightV = parseFloat(val) / 100;
-  _discWeightKD = 1 - _discWeightV;
-  document.getElementById('disc-weight-pct').textContent =
-    `검색량 ${Math.round(_discWeightV*100)}% / KD ${Math.round(_discWeightKD*100)}%`;
-  _recomputeStars();
+function onWeightChange(which, val) {
+  const v = parseInt(val);
+  if (which === 'alpha') _wAlpha = v;
+  else if (which === 'beta') _wBeta = v;
+  else if (which === 'gamma') _wGamma = v;
+  const el = { alpha: 'disc-w-alpha', beta: 'disc-w-beta', gamma: 'disc-w-gamma' };
+  ['alpha','beta','gamma'].forEach(k => {
+    const node = document.getElementById(el[k]);
+    if (node) node.textContent = (k==='alpha'?_wAlpha:k==='beta'?_wBeta:_wGamma) + '%';
+  });
+  _recomputeScores();
 }
 
 // ── 추천도 계산 ──
-function computeDiscScore(kw, maxVolN) {
-  const volScore = maxVolN > 0 ? ((kw.volumeN || 0) / maxVolN * 100) : 0;
-  const kdScore  = 100 - (kw.kd || 50);
-  const srcBonus = (kw.sources || []).length >= 2 ? 5 : 0;
-  return Math.round(volScore * _discWeightV + kdScore * _discWeightKD + srcBonus);
+// 신호점수 소스별 고정값: 경쟁사 50, 뉴스 25, 자사 15, AI 10, 구글SERP 5
+function computeSignalScore(kw) {
+  const sm = { '경': 50, '뉴': 25, '자': 15, 'AI': 10, '구': 5 };
+  return Math.min(100, (kw.sources || []).reduce((sum, s) => sum + (sm[s] || 0), 0));
 }
 
-function _starsHtml(score) {
-  const filled = Math.round(score / 20); // 100점 → 5개
-  return '<span class="star-score">' +
-    '★'.repeat(Math.max(0, filled)) +
-    '<span class="empty">' + '★'.repeat(5 - Math.max(0, filled)) + '</span>' +
-    '</span>';
+// 추천도 = 기회점수×α + 진입점수×β + 신호점수×γ
+function computeDiscScore(kw, maxVolN, maxVolG) {
+  const total = (_wAlpha + _wBeta + _wGamma) || 100;
+  const alpha = _wAlpha / total, beta = _wBeta / total, gamma = _wGamma / total;
+  const volN = maxVolN > 0 ? (kw.volumeN || 0) / maxVolN * 100 : 0;
+  const volG = maxVolG > 0 ? (kw.volumeG || 0) / maxVolG * 100 : 0;
+  const 기회 = Math.max(volN, volG);
+  const 진입 = (kw.kd !== null && kw.kd !== undefined) ? (100 - kw.kd) : 50;
+  const 신호 = computeSignalScore(kw);
+  return Math.round(기회 * alpha + 진입 * beta + 신호 * gamma);
+}
+
+function _scoreHtml(score) {
+  const color = score >= 70 ? '#059669' : score >= 40 ? '#D97706' : '#94A3B8';
+  return `<span class="disc-score-badge" style="color:${color}">${score}</span>`;
 }
 
 let _lastDiscKeywords = []; // 마지막 결과 캐싱
 
-function _recomputeStars() {
+function _recomputeScores() {
   if (!_lastDiscKeywords.length) return;
   const maxVolN = Math.max(..._lastDiscKeywords.map(k => k.volumeN || 0), 1);
+  const maxVolG = Math.max(..._lastDiscKeywords.map(k => k.volumeG || 0), 1);
   document.querySelectorAll('#disc-result-table tbody tr').forEach(row => {
     const kw = _lastDiscKeywords.find(k => k.keyword === row.dataset.keyword);
     if (!kw) return;
-    kw.score = computeDiscScore(kw, maxVolN);
+    kw.score = computeDiscScore(kw, maxVolN, maxVolG);
     row.dataset.score = kw.score;
-    const starCell = row.querySelector('.disc-star-cell');
-    if (starCell) starCell.innerHTML = _starsHtml(kw.score);
+    const scoreCell = row.querySelector('.disc-score-cell');
+    if (scoreCell) scoreCell.innerHTML = _scoreHtml(kw.score);
   });
 }
 
@@ -805,7 +878,8 @@ async function discoverKeywords() {
 
     // ─── 6. 추천도 계산 후 정렬 ────────────────────────────────────
     const maxVolN = Math.max(...merged.map(k => k.volumeN || 0), 1);
-    merged.forEach(kw => { kw.score = computeDiscScore(kw, maxVolN); });
+    const maxVolG = Math.max(...merged.map(k => k.volumeG || 0), 1);
+    merged.forEach(kw => { kw.score = computeDiscScore(kw, maxVolN, maxVolG); });
     merged.sort((a, b) => b.volumeN - a.volumeN);
 
     _lastDiscKeywords = merged;
@@ -972,13 +1046,18 @@ function renderDiscoverTable(keywords) {
 
   const TID = 'disc-result-table';
 
-  // 가중치 슬라이더 HTML
+  // 가중치 슬라이더 HTML (α=기회, β=진입, γ=신호)
   const sliderHtml = `<div class="weight-bar">
-    <span class="info-tip" data-tip="검색량과 KD 중 어느 쪽을 더 중시할지 결정해요.\n신규 사이트는 KD를 높게, 큰 사이트는 검색량을 높게 설정 권장.\n조절 시 추천도가 실시간으로 재계산돼요.">ⓘ</span>
-    <span class="weight-label">검색량 우선</span>
-    <input type="range" class="weight-slider" min="10" max="90" value="${Math.round(_discWeightV*100)}" oninput="onWeightSlide(this.value)">
-    <span class="weight-label">KD 우선</span>
-    <span class="weight-pct" id="disc-weight-pct">검색량 ${Math.round(_discWeightV*100)}% / KD ${Math.round(_discWeightKD*100)}%</span>
+    <span class="info-tip" data-tip="추천도 = 기회점수×α + 진입점수×β + 신호점수×γ&#10;기회: max(검색량N, 검색량G) 정규화 0~100&#10;진입: (100-KD) 0~100&#10;신호: 경쟁사+50, 뉴스+25, 자사+15, AI+10 (최대 100)&#10;슬라이더 조절 시 추천도 실시간 재계산">ⓘ</span>
+    <span class="weight-label">α 기회</span>
+    <input type="range" class="weight-slider" min="0" max="100" step="5" value="${_wAlpha}" oninput="onWeightChange('alpha',this.value)">
+    <span class="weight-pct" id="disc-w-alpha">${_wAlpha}%</span>
+    <span class="weight-label" style="margin-left:8px">β 진입</span>
+    <input type="range" class="weight-slider" min="0" max="100" step="5" value="${_wBeta}" oninput="onWeightChange('beta',this.value)">
+    <span class="weight-pct" id="disc-w-beta">${_wBeta}%</span>
+    <span class="weight-label" style="margin-left:8px">γ 신호</span>
+    <input type="range" class="weight-slider" min="0" max="100" step="5" value="${_wGamma}" oninput="onWeightChange('gamma',this.value)">
+    <span class="weight-pct" id="disc-w-gamma">${_wGamma}%</span>
   </div>`;
 
   // 테이블 헤더
@@ -990,7 +1069,7 @@ function renderDiscoverTable(keywords) {
     <th class="sortable" style="width:110px" onclick="sortDiscTable('volumeG',this)"><span class="info-tip" data-tip="DataForSEO를 통해 가져온 구글 월간 검색량 절댓값.">ⓘ</span>검색량(G) <span class="sort-icon">↕</span></th>
     <th class="sortable" style="width:100px" onclick="sortDiscTable('kd',this)"><span class="info-tip" data-tip="DataForSEO가 구글 1페이지 상위 10개 결과의\n백링크·도메인 권위도·SERP 특성을 실제 크롤링해서 산출한 경쟁도.\n🟢 0~30 진입 가능 / 🟡 31~60 중간 경쟁 / 🔴 61~100 진입 어려움">ⓘ</span>KD <span class="sort-icon">↕</span></th>
     <th style="width:100px">소스</th>
-    <th class="sortable" style="width:90px" onclick="sortDiscTable('score',this)"><span class="info-tip" data-tip="추천도 = 검색량 점수 × 가중치A + KD 점수 × 가중치B + 소스 보너스\n소스 보너스: +5점 (2개 이상 소스에서 중복 발굴 시)\n가중치 슬라이더로 검색량/KD 비율을 직접 조절할 수 있어요.">ⓘ</span>추천도 <span class="sort-icon">↕</span></th>
+    <th class="sortable" style="width:90px" onclick="sortDiscTable('score',this)"><span class="info-tip" data-tip="추천도 = 기회점수×α + 진입점수×β + 신호점수×γ&#10;기회: max(검색량N,G) 정규화 0~100&#10;진입: (100-KD) 0~100&#10;신호: 경쟁사+50, 뉴스+25, 자사+15, AI+10">ⓘ</span>추천도 <span class="sort-icon">↕</span></th>
     <th style="width:36px"></th>
   </tr></thead>`;
 
@@ -1030,7 +1109,7 @@ function renderDiscoverTable(keywords) {
       <td class="num-cell">${volGHtml}</td>
       <td style="white-space:nowrap">${kdHtml}</td>
       <td><div class="src-badges">${srcBadges}</div></td>
-      <td class="disc-star-cell">${_starsHtml(kw.score||0)}</td>
+      <td class="disc-score-cell">${_scoreHtml(kw.score||0)}</td>
       <td>${makeKebab('d'+keywords.indexOf(kw), kw.keyword)}</td>
     </tr>`;
   }).join('');
@@ -1111,6 +1190,10 @@ function loadPrevDiscoverResult() {
     const cached = localStorage.getItem('jugle_discover_cache');
     if (!cached) return;
     const { keywords } = JSON.parse(cached);
+    // 캐시 로드 시 추천도 재계산 (가중치 변경 반영)
+    const maxVolN = Math.max(...keywords.map(k => k.volumeN || 0), 1);
+    const maxVolG = Math.max(...keywords.map(k => k.volumeG || 0), 1);
+    keywords.forEach(k => { k.score = computeDiscScore(k, maxVolN, maxVolG); });
     _lastDiscKeywords = keywords;
     renderDiscoverTable(keywords);
     showToast('이전 발굴 결과를 불러왔어요.');
@@ -1132,7 +1215,8 @@ function demoDiscover() {
     { keyword: 'LangChain 튜토리얼', intent: '인지', volumeN: 5500, volumeG: 3300, kd: 38, sources: ['경', '뉴'], reason: '프레임워크 학습 수요', urlSources: [], articles: [{title: 'LangChain 입문', url: 'https://news.com/3', summary: ''}], score: 0 },
   ];
   const maxVolN = Math.max(...demoKws.map(k => k.volumeN), 1);
-  demoKws.forEach(k => { k.score = computeDiscScore(k, maxVolN); });
+  const maxVolG = Math.max(...demoKws.map(k => k.volumeG), 1);
+  demoKws.forEach(k => { k.score = computeDiscScore(k, maxVolN, maxVolG); });
   _lastDiscKeywords = demoKws;
   renderDiscoverTable(demoKws);
   showToast('데모 데이터를 불러왔어요.');

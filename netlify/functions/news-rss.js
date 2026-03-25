@@ -44,18 +44,30 @@ exports.handler = async function(event) {
     }
   }));
   
-  // 중복 제거 및 최신 20개 정렬
+  // 중복 제거
   const seen = new Set();
   const unique = articles.filter(a => {
     if (seen.has(a.title)) return false;
     seen.add(a.title);
     return true;
-  }).slice(0, 20);
-  
+  });
+
+  // topic 키워드로 필터링 (tech가 아닐 때만)
+  let filtered = unique;
+  if (topic && topic !== 'tech') {
+    const topicWords = topic.split(/[\s,]+/).filter(Boolean).map(w => w.toLowerCase());
+    const relevant = unique.filter(a => {
+      const hay = (a.title + ' ' + a.summary).toLowerCase();
+      return topicWords.some(w => hay.includes(w));
+    });
+    // 관련 기사가 3개 이상이면 필터링 적용, 아니면 전체 반환
+    filtered = relevant.length >= 3 ? relevant : unique;
+  }
+
   return {
     statusCode: 200,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ articles: unique, topic })
+    body: JSON.stringify({ articles: filtered.slice(0, 20), topic })
   };
 };
 

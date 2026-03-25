@@ -154,6 +154,20 @@
     <button class="btn btn-ghost" style="margin-left:6px" onclick="clearApiKey()">초기화</button>
   </div>
   <div class="card settings-form">
+    <div class="card-title">🔍 DataForSEO API (구글 검색량 · KD)</div>
+    <div class="field">
+      <label>Client ID</label>
+      <div class="key-input-wrap"><input type="password" id="dfs-id-input" placeholder="이메일 형식"/><span class="key-toggle" onclick="toggleDfsVisibility('id')">보기</span></div>
+    </div>
+    <div class="field" style="margin-top:10px">
+      <label>Client Secret</label>
+      <div class="key-input-wrap"><input type="password" id="dfs-secret-input" placeholder="DataForSEO 비밀번호"/><span class="key-toggle" onclick="toggleDfsVisibility('secret')">보기</span></div>
+    </div>
+    <div class="text-xs" style="margin-top:6px;margin-bottom:12px">app.dataforseo.com에서 발급 · Netlify 환경변수 DATAFORSEO_CLIENT_ID / DATAFORSEO_CLIENT_SECRET에도 설정 필요</div>
+    <button class="btn btn-primary" onclick="saveDfsKeys()">저장</button>
+    <button class="btn btn-ghost" style="margin-left:6px" onclick="clearDfsKeys()">초기화</button>
+  </div>
+  <div class="card settings-form">
     <div class="card-title">🗄️ 데이터 관리</div>
     <div style="display:flex;flex-direction:column;gap:8px">
       <button class="btn btn-secondary" onclick="exportJSON()">⬇ JSON으로 전체 백업</button>
