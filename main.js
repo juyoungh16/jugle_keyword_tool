@@ -567,6 +567,23 @@ async function callClaude(prompt){
 }
 
 // ── API 키 / 백업 ────────────────────────────────────────────
+// DataForSEO 키 (로컬 저장 — Netlify 환경변수 설정 안내용)
+function saveDfsKeys(){
+  const id=document.getElementById('dfs-id-input').value.trim();
+  const secret=document.getElementById('dfs-secret-input').value.trim();
+  if(!id||!secret){showMsg('settings-msg','ID와 Secret을 모두 입력해주세요.','warning');return;}
+  localStorage.setItem('jugle_dfs_id',id);
+  localStorage.setItem('jugle_dfs_secret',secret);
+  showMsg('settings-msg','✅ DataForSEO 키 저장 완료! Netlify 환경변수에도 동일하게 설정해주세요.','success');
+}
+function clearDfsKeys(){
+  localStorage.removeItem('jugle_dfs_id');localStorage.removeItem('jugle_dfs_secret');
+  document.getElementById('dfs-id-input').value='';document.getElementById('dfs-secret-input').value='';
+}
+function toggleDfsVisibility(which){
+  const input=document.getElementById(which==='id'?'dfs-id-input':'dfs-secret-input');
+  input.type=input.type==='password'?'text':'password';
+}
 function getApiKey(){return localStorage.getItem('jugle_api_key')||'';}
 function saveApiKey(){const key=document.getElementById('api-key-input').value.trim();if(!key.startsWith('sk-ant')){showMsg('settings-msg','올바른 API 키 형식이 아니에요.','warning');return;}localStorage.setItem('jugle_api_key',key);updateApiStatus(true);showMsg('settings-msg','✅ API 키가 저장됐어요!','success');}
 function clearApiKey(){localStorage.removeItem('jugle_api_key');document.getElementById('api-key-input').value='';updateApiStatus(false);}
@@ -580,6 +597,10 @@ function escStr(s){return s.replace(/'/g,"\\'").replace(/"/g,'&quot;');}
 (function init(){
   const key=getApiKey();
   if(key){document.getElementById('api-key-input').value=key;updateApiStatus(true);}
+  const dfsId=localStorage.getItem('jugle_dfs_id');
+  const dfsSecret=localStorage.getItem('jugle_dfs_secret');
+  if(dfsId) document.getElementById('dfs-id-input').value=dfsId;
+  if(dfsSecret) document.getElementById('dfs-secret-input').value=dfsSecret;
   _initDiscoverPrevButton();
 })();
 
@@ -640,46 +661,59 @@ function _renderDiscFileList() {
   </div>`).join('');
 }
 
-// ── 가중치 상태 ──
-let _discWeightV = 0.6;   // 검색량 가중치
-let _discWeightKD = 0.4;  // KD 가중치 (역산)
+// ── 가중치 상태 (α=기회, β=진입, γ=신호) ──
+let _wAlpha = 50, _wBeta = 30, _wGamma = 20; // raw 0-100 합산 정규화
 
-function onWeightSlide(val) {
-  _discWeightV = parseFloat(val) / 100;
-  _discWeightKD = 1 - _discWeightV;
-  document.getElementById('disc-weight-pct').textContent =
-    `검색량 ${Math.round(_discWeightV*100)}% / KD ${Math.round(_discWeightKD*100)}%`;
-  _recomputeStars();
+function onWeightChange(which, val) {
+  const v = parseInt(val);
+  if (which === 'alpha') _wAlpha = v;
+  else if (which === 'beta') _wBeta = v;
+  else if (which === 'gamma') _wGamma = v;
+  const el = { alpha: 'disc-w-alpha', beta: 'disc-w-beta', gamma: 'disc-w-gamma' };
+  ['alpha','beta','gamma'].forEach(k => {
+    const node = document.getElementById(el[k]);
+    if (node) node.textContent = (k==='alpha'?_wAlpha:k==='beta'?_wBeta:_wGamma) + '%';
+  });
+  _recomputeScores();
 }
 
 // ── 추천도 계산 ──
-function computeDiscScore(kw, maxVolN) {
-  const volScore = maxVolN > 0 ? ((kw.volumeN || 0) / maxVolN * 100) : 0;
-  const kdScore  = 100 - (kw.kd || 50);
-  const srcBonus = (kw.sources || []).length >= 2 ? 5 : 0;
-  return Math.round(volScore * _discWeightV + kdScore * _discWeightKD + srcBonus);
+// 신호점수 소스별 고정값: 경쟁사 50, 뉴스 25, 자사 15, AI 10, 구글SERP 5
+function computeSignalScore(kw) {
+  const sm = { '경': 50, '뉴': 25, '자': 15, 'AI': 10, '구': 5 };
+  return Math.min(100, (kw.sources || []).reduce((sum, s) => sum + (sm[s] || 0), 0));
 }
 
-function _starsHtml(score) {
-  const filled = Math.round(score / 20); // 100점 → 5개
-  return '<span class="star-score">' +
-    '★'.repeat(Math.max(0, filled)) +
-    '<span class="empty">' + '★'.repeat(5 - Math.max(0, filled)) + '</span>' +
-    '</span>';
+// 추천도 = 기회점수×α + 진입점수×β + 신호점수×γ
+function computeDiscScore(kw, maxVolN, maxVolG) {
+  const total = (_wAlpha + _wBeta + _wGamma) || 100;
+  const alpha = _wAlpha / total, beta = _wBeta / total, gamma = _wGamma / total;
+  const volN = maxVolN > 0 ? (kw.volumeN || 0) / maxVolN * 100 : 0;
+  const volG = maxVolG > 0 ? (kw.volumeG || 0) / maxVolG * 100 : 0;
+  const 기회 = Math.max(volN, volG);
+  const 진입 = (kw.kd !== null && kw.kd !== undefined) ? (100 - kw.kd) : 50;
+  const 신호 = computeSignalScore(kw);
+  return Math.round(기회 * alpha + 진입 * beta + 신호 * gamma);
+}
+
+function _scoreHtml(score) {
+  const color = score >= 70 ? '#059669' : score >= 40 ? '#D97706' : '#94A3B8';
+  return `<span class="disc-score-badge" style="color:${color}">${score}</span>`;
 }
 
 let _lastDiscKeywords = []; // 마지막 결과 캐싱
 
-function _recomputeStars() {
+function _recomputeScores() {
   if (!_lastDiscKeywords.length) return;
   const maxVolN = Math.max(..._lastDiscKeywords.map(k => k.volumeN || 0), 1);
+  const maxVolG = Math.max(..._lastDiscKeywords.map(k => k.volumeG || 0), 1);
   document.querySelectorAll('#disc-result-table tbody tr').forEach(row => {
     const kw = _lastDiscKeywords.find(k => k.keyword === row.dataset.keyword);
     if (!kw) return;
-    kw.score = computeDiscScore(kw, maxVolN);
+    kw.score = computeDiscScore(kw, maxVolN, maxVolG);
     row.dataset.score = kw.score;
-    const starCell = row.querySelector('.disc-star-cell');
-    if (starCell) starCell.innerHTML = _starsHtml(kw.score);
+    const scoreCell = row.querySelector('.disc-score-cell');
+    if (scoreCell) scoreCell.innerHTML = _scoreHtml(kw.score);
   });
 }
 
@@ -805,7 +839,8 @@ async function discoverKeywords() {
 
     // ─── 6. 추천도 계산 후 정렬 ────────────────────────────────────
     const maxVolN = Math.max(...merged.map(k => k.volumeN || 0), 1);
-    merged.forEach(kw => { kw.score = computeDiscScore(kw, maxVolN); });
+    const maxVolG = Math.max(...merged.map(k => k.volumeG || 0), 1);
+    merged.forEach(kw => { kw.score = computeDiscScore(kw, maxVolN, maxVolG); });
     merged.sort((a, b) => b.volumeN - a.volumeN);
 
     _lastDiscKeywords = merged;
@@ -972,13 +1007,18 @@ function renderDiscoverTable(keywords) {
 
   const TID = 'disc-result-table';
 
-  // 가중치 슬라이더 HTML
+  // 가중치 슬라이더 HTML (α=기회, β=진입, γ=신호)
   const sliderHtml = `<div class="weight-bar">
-    <span class="info-tip" data-tip="검색량과 KD 중 어느 쪽을 더 중시할지 결정해요.\n신규 사이트는 KD를 높게, 큰 사이트는 검색량을 높게 설정 권장.\n조절 시 추천도가 실시간으로 재계산돼요.">ⓘ</span>
-    <span class="weight-label">검색량 우선</span>
-    <input type="range" class="weight-slider" min="10" max="90" value="${Math.round(_discWeightV*100)}" oninput="onWeightSlide(this.value)">
-    <span class="weight-label">KD 우선</span>
-    <span class="weight-pct" id="disc-weight-pct">검색량 ${Math.round(_discWeightV*100)}% / KD ${Math.round(_discWeightKD*100)}%</span>
+    <span class="info-tip" data-tip="추천도 = 기회점수×α + 진입점수×β + 신호점수×γ&#10;기회: max(검색량N, 검색량G) 정규화 0~100&#10;진입: (100-KD) 0~100&#10;신호: 경쟁사+50, 뉴스+25, 자사+15, AI+10 (최대 100)&#10;슬라이더 조절 시 추천도 실시간 재계산">ⓘ</span>
+    <span class="weight-label">α 기회</span>
+    <input type="range" class="weight-slider" min="0" max="100" step="5" value="${_wAlpha}" oninput="onWeightChange('alpha',this.value)">
+    <span class="weight-pct" id="disc-w-alpha">${_wAlpha}%</span>
+    <span class="weight-label" style="margin-left:8px">β 진입</span>
+    <input type="range" class="weight-slider" min="0" max="100" step="5" value="${_wBeta}" oninput="onWeightChange('beta',this.value)">
+    <span class="weight-pct" id="disc-w-beta">${_wBeta}%</span>
+    <span class="weight-label" style="margin-left:8px">γ 신호</span>
+    <input type="range" class="weight-slider" min="0" max="100" step="5" value="${_wGamma}" oninput="onWeightChange('gamma',this.value)">
+    <span class="weight-pct" id="disc-w-gamma">${_wGamma}%</span>
   </div>`;
 
   // 테이블 헤더
@@ -990,7 +1030,7 @@ function renderDiscoverTable(keywords) {
     <th class="sortable" style="width:110px" onclick="sortDiscTable('volumeG',this)"><span class="info-tip" data-tip="DataForSEO를 통해 가져온 구글 월간 검색량 절댓값.">ⓘ</span>검색량(G) <span class="sort-icon">↕</span></th>
     <th class="sortable" style="width:100px" onclick="sortDiscTable('kd',this)"><span class="info-tip" data-tip="DataForSEO가 구글 1페이지 상위 10개 결과의\n백링크·도메인 권위도·SERP 특성을 실제 크롤링해서 산출한 경쟁도.\n🟢 0~30 진입 가능 / 🟡 31~60 중간 경쟁 / 🔴 61~100 진입 어려움">ⓘ</span>KD <span class="sort-icon">↕</span></th>
     <th style="width:100px">소스</th>
-    <th class="sortable" style="width:90px" onclick="sortDiscTable('score',this)"><span class="info-tip" data-tip="추천도 = 검색량 점수 × 가중치A + KD 점수 × 가중치B + 소스 보너스\n소스 보너스: +5점 (2개 이상 소스에서 중복 발굴 시)\n가중치 슬라이더로 검색량/KD 비율을 직접 조절할 수 있어요.">ⓘ</span>추천도 <span class="sort-icon">↕</span></th>
+    <th class="sortable" style="width:90px" onclick="sortDiscTable('score',this)"><span class="info-tip" data-tip="추천도 = 기회점수×α + 진입점수×β + 신호점수×γ&#10;기회: max(검색량N,G) 정규화 0~100&#10;진입: (100-KD) 0~100&#10;신호: 경쟁사+50, 뉴스+25, 자사+15, AI+10">ⓘ</span>추천도 <span class="sort-icon">↕</span></th>
     <th style="width:36px"></th>
   </tr></thead>`;
 
@@ -1030,7 +1070,7 @@ function renderDiscoverTable(keywords) {
       <td class="num-cell">${volGHtml}</td>
       <td style="white-space:nowrap">${kdHtml}</td>
       <td><div class="src-badges">${srcBadges}</div></td>
-      <td class="disc-star-cell">${_starsHtml(kw.score||0)}</td>
+      <td class="disc-score-cell">${_scoreHtml(kw.score||0)}</td>
       <td>${makeKebab('d'+keywords.indexOf(kw), kw.keyword)}</td>
     </tr>`;
   }).join('');
@@ -1111,6 +1151,10 @@ function loadPrevDiscoverResult() {
     const cached = localStorage.getItem('jugle_discover_cache');
     if (!cached) return;
     const { keywords } = JSON.parse(cached);
+    // 캐시 로드 시 추천도 재계산 (가중치 변경 반영)
+    const maxVolN = Math.max(...keywords.map(k => k.volumeN || 0), 1);
+    const maxVolG = Math.max(...keywords.map(k => k.volumeG || 0), 1);
+    keywords.forEach(k => { k.score = computeDiscScore(k, maxVolN, maxVolG); });
     _lastDiscKeywords = keywords;
     renderDiscoverTable(keywords);
     showToast('이전 발굴 결과를 불러왔어요.');
@@ -1132,7 +1176,8 @@ function demoDiscover() {
     { keyword: 'LangChain 튜토리얼', intent: '인지', volumeN: 5500, volumeG: 3300, kd: 38, sources: ['경', '뉴'], reason: '프레임워크 학습 수요', urlSources: [], articles: [{title: 'LangChain 입문', url: 'https://news.com/3', summary: ''}], score: 0 },
   ];
   const maxVolN = Math.max(...demoKws.map(k => k.volumeN), 1);
-  demoKws.forEach(k => { k.score = computeDiscScore(k, maxVolN); });
+  const maxVolG = Math.max(...demoKws.map(k => k.volumeG), 1);
+  demoKws.forEach(k => { k.score = computeDiscScore(k, maxVolN, maxVolG); });
   _lastDiscKeywords = demoKws;
   renderDiscoverTable(demoKws);
   showToast('데모 데이터를 불러왔어요.');
