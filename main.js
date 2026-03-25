@@ -258,48 +258,49 @@ async function expandLongtail(){
   const seeds=document.getElementById('seed-keyword').value.trim();
   if(!seeds){alert('씨앗 키워드를 입력해주세요.');return;}
   const result=document.getElementById('longtail-result');
-  result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">네이버 검색광고 API에서 "${seeds}" 연관 키워드 조회 중…</div></div></div>`;
-  
+  result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text" id="lt-prog">네이버 검색광고 API에서 "${seeds}" 연관 키워드 조회 중…</div></div></div>`;
+  const setLtProg = msg => { const el=document.getElementById('lt-prog'); if(el) el.textContent=msg; };
+
   try {
     // 쉼표로 나눈 첫 번째 키워드를 사용하되 특수문자는 제거 (네이버 검색광고 API 에러 방지)
     const rawKeyword = seeds.split(',')[0].trim();
     const hintKeyword = rawKeyword.replace(/[^a-zA-Z0-9가-힣\s]/g, '');
     const res = await fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(hintKeyword)}`);
-    
+
     if (!res.ok) {
       const errInfo = await res.json();
       throw new Error(errInfo.error || 'API 연동 오류');
     }
-    
+
     const data = await res.json();
     if (!data.keywordList || data.keywordList.length === 0) {
       result.innerHTML = `<div class="card"><div class="text-xs">관련 키워드가 없습니다.</div></div>`;
       return;
     }
-    
+
     // 네이버 검색광고 API 결과 가공 (최대 40개)
+    // kdSource: 'naver' = 네이버 compIdx 기반 추정, 'google' = DataForSEO 실데이터
+    const compMap = {'높음': 80, '중간': 50, '낮음': 20};
     const keywords = data.keywordList.slice(0, 40).map(k => {
-      // 10 미만 값('< 10' 등 문자열)은 숫자 10으로 취급
       const pc = typeof k.monthlyPcQcCnt === 'number' ? k.monthlyPcQcCnt : 10;
       const mo = typeof k.monthlyMobileQcCnt === 'number' ? k.monthlyMobileQcCnt : 10;
       const vol = pc + mo;
-      
-      const compMap = {'높음': 80, '중간': 50, '낮음': 20};
-      const kd = compMap[k.compIdx] || 50;
-      
+      const kdNaver = compMap[k.compIdx] || 50;
+
       // 인텐트 규칙 기반 판단 (AI 추론 대신)
       let intent = '인지';
       const kw = k.relKeyword;
       if (/(가격|비용|신청|다운|할인|구매|가입|예약|판매|견적)/.test(kw)) intent = '전환';
       else if (/(추천|비교|후기|차이|순위|리뷰|장단점|베스트)/.test(kw)) intent = '고려';
-      
-      return { keyword: kw, intent, volume: vol, kd };
+
+      return { keyword: kw, intent, volume: vol, kd: kdNaver, kdSource: 'naver', volumeG: 0 };
     });
-    
+
     // 검색량 순 정렬
     keywords.sort((a, b) => b.volume - a.volume);
-    
-    // 데이터랩 API 연동 (12주 트렌드 스파크라인 및 방향)
+
+    // ── 1단계: 네이버 데이터랩 스파크라인 ──────────────────────
+    setLtProg('네이버 트렌드 데이터 조회 중…');
     try {
       const dlRes = await fetch('/.netlify/functions/naver-datalab', {
         method: 'POST',
@@ -317,7 +318,28 @@ async function expandLongtail(){
     } catch(e) {
       console.error('Datalab Error in expandLongtail:', e);
     }
-    
+
+    // ── 2단계: DataForSEO 구글 KD + 검색량 (실데이터 교체) ─────
+    setLtProg('DataForSEO Google KD 조회 중…');
+    try {
+      const dfsRes = await fetch('/.netlify/functions/dataforseo', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keywords: keywords.map(k => k.keyword) })
+      });
+      if (dfsRes.ok) {
+        const dfsData = await dfsRes.json();
+        for (const kw of keywords) {
+          const d = dfsData[kw.keyword];
+          if (d) {
+            if (d.kd > 0) { kw.kd = d.kd; kw.kdSource = 'google'; }
+            if (d.volume_g > 0) kw.volumeG = d.volume_g;
+          }
+        }
+      }
+    } catch(e) {
+      console.error('DataForSEO KD Error in expandLongtail:', e);
+    }
+
     renderLongtailTable({ keywords }, seeds);
   } catch(e) {
     result.innerHTML=`<div class="card"><div class="stream-box">오류: ${e.message}<br><br>※ Netlify 환경변수(NAVER_API_KEY, NAVER_SECRET_KEY, NAVER_CUSTOMER_ID)가 정상적으로 설정되었는지 확인하세요.</div></div>`;
@@ -329,13 +351,23 @@ function renderLongtailTable(data,seeds){
   const result=document.getElementById('longtail-result');
   const kws=data.keywords||[];
   tableIntentFilter[TID]=null;
+
+  // 인텐트 집계
   const counts={'인지':0,'고려':0,'전환':0};
   kws.forEach(k=>{if(counts[k.intent]!==undefined) counts[k.intent]++;});
+
+  // KD 실데이터 vs 추정 집계
+  const realKdCount = kws.filter(k => k.kdSource === 'google').length;
+  const kdBadge = realKdCount > 0
+    ? `<span class="text-xs" style="color:var(--green);background:var(--green-lt);padding:2px 7px;border-radius:4px;border:1px solid #BBF7D0;">✅ KD 실데이터 ${realKdCount}/${kws.length}</span>`
+    : `<span class="text-xs" style="color:var(--amber);background:var(--amber-lt);padding:2px 7px;border-radius:4px;border:1px solid #FDE68A;">⚠️ KD 추정값 (DataForSEO 미설정)</span>`;
+
   let html=`
     <div class="result-summary">
       <span>🌱 <strong>"${seeds}"</strong> 확장 · 총 <strong>${kws.length}개</strong></span>
       <span>${Object.entries(counts).filter(([,v])=>v>0).map(([k,v])=>`<span class="intent-pill ${INTENTS[k].cls}">${k} ${v}</span>`).join(' ')}</span>
-      <span class="text-xs" style="color:var(--green);background:var(--green-lt);padding:2px 7px;border-radius:4px;border:1px solid #BBF7D0;">✅ 실제 검색량</span>
+      <span class="text-xs" style="color:var(--green);background:var(--green-lt);padding:2px 7px;border-radius:4px;border:1px solid #BBF7D0;">✅ 실제 검색량(N)</span>
+      ${kdBadge}
       <div class="result-actions">
         <button class="btn btn-secondary btn-sm" id="sel-step3-btn-${TID}" onclick="sendLongtailToStrategy(false)" disabled style="opacity:0.4">→ STEP 3 클러스터 (<span id="sel-count-${TID}">0</span>)</button>
         <button class="btn btn-primary btn-sm" onclick="sendLongtailToStrategy(true)">전체 → STEP 3</button>
@@ -346,22 +378,29 @@ function renderLongtailTable(data,seeds){
       <thead>${makeTableHeader(TID,[
         {label:'키워드',key:'keyword'},
         {label:'의도',key:'intent'},
-        {label:'Volume',key:'volume',sortable:true,width:'110px'},
-        {label:'추이',key:'trend',sortable:false,width:'120px'},
-        {label:'경쟁도',key:'kd',sortable:true,width:'150px'},
+        {label:'검색량(N)',key:'volume',sortable:true,width:'100px'},
+        {label:'검색량(G)',key:'volumeG',sortable:true,width:'100px'},
+        {label:'추이',key:'trend',sortable:false,width:'100px'},
+        {label:'KD (Google)',key:'kd',sortable:true,width:'140px'},
       ])}</thead>
       <tbody id="lt-tbody">`;
+
   kws.forEach((kw,idx)=>{
     const sparkColor={'인지':'#0284C7','고려':'#CA8A04','전환':'#16A34A'}[kw.intent] || '#64748B';
     const trendHtml = kw.sparkline ? `<div style="display:flex;align-items:center;gap:6px">${makeSparkline(kw.sparkline, sparkColor)}</div>` : '-';
+    const volGHtml = kw.volumeG > 0 ? fmtVol(kw.volumeG) : '-';
+    const kdHtml = kw.kdSource === 'google'
+      ? kdBar(kw.kd)
+      : `${kdBar(kw.kd)}<span title="네이버 경쟁도 기반 추정" style="font-size:9px;color:var(--text3);margin-left:3px">추정</span>`;
 
-    html+=`<tr data-volume="${kw.volume}" data-kd="${kw.kd}" data-intent="${kw.intent}">
+    html+=`<tr data-volume="${kw.volume}" data-volume-g="${kw.volumeG||0}" data-kd="${kw.kd}" data-intent="${kw.intent}">
       <td><input type="checkbox" class="row-checkbox" onchange="toggleRow('${TID}',this)"></td>
       <td class="keyword-cell">${kw.keyword}</td>
       <td>${intentPill(kw.intent,TID,idx)}</td>
       <td class="num-cell">${fmtVol(kw.volume)}</td>
+      <td class="num-cell">${volGHtml}</td>
       <td style="padding:6px 12px;">${trendHtml}</td>
-      <td>${kdBar(kw.kd)}</td>
+      <td>${kdHtml}</td>
       <td>${makeKebab('l'+idx,kw.keyword)}</td>
     </tr>`;
   });
@@ -372,18 +411,18 @@ function renderLongtailTable(data,seeds){
 function demoLongtail(){
   document.getElementById('seed-keyword').value='AI 코딩 도구';
   renderLongtailTable({keywords:[
-    {keyword:'AI 코딩 도구란',intent:'인지',volume:8100,kd:25},
-    {keyword:'AI 코딩 도구 추천',intent:'고려',volume:18200,kd:38},
-    {keyword:'AI 코딩 도구 비교',intent:'고려',volume:12100,kd:42},
-    {keyword:'AI 코딩 도구 무료',intent:'고려',volume:9900,kd:30},
-    {keyword:'Cursor vs GitHub Copilot',intent:'고려',volume:14400,kd:45},
-    {keyword:'AI 코딩 도구 사용법',intent:'인지',volume:6600,kd:28},
-    {keyword:'개발자 AI 도구 추천',intent:'고려',volume:22000,kd:35},
-    {keyword:'AI 코딩 도구 단점',intent:'인지',volume:4400,kd:22},
-    {keyword:'AI 코딩 생산성 효과',intent:'인지',volume:5500,kd:32},
-    {keyword:'Copilot 구독 가격',intent:'전환',volume:16500,kd:18},
-    {keyword:'Cursor AI 다운로드',intent:'전환',volume:27100,kd:15},
-    {keyword:'AI 코딩 도구 스타트업',intent:'고려',volume:3300,kd:20},
+    {keyword:'AI 코딩 도구란',intent:'인지',volume:8100,volumeG:5400,kd:25,kdSource:'google'},
+    {keyword:'AI 코딩 도구 추천',intent:'고려',volume:18200,volumeG:12300,kd:38,kdSource:'google'},
+    {keyword:'AI 코딩 도구 비교',intent:'고려',volume:12100,volumeG:8800,kd:42,kdSource:'google'},
+    {keyword:'AI 코딩 도구 무료',intent:'고려',volume:9900,volumeG:6600,kd:30,kdSource:'google'},
+    {keyword:'Cursor vs GitHub Copilot',intent:'고려',volume:14400,volumeG:9900,kd:45,kdSource:'google'},
+    {keyword:'AI 코딩 도구 사용법',intent:'인지',volume:6600,volumeG:0,kd:28,kdSource:'naver'},
+    {keyword:'개발자 AI 도구 추천',intent:'고려',volume:22000,volumeG:14800,kd:35,kdSource:'google'},
+    {keyword:'AI 코딩 도구 단점',intent:'인지',volume:4400,volumeG:0,kd:22,kdSource:'naver'},
+    {keyword:'AI 코딩 생산성 효과',intent:'인지',volume:5500,volumeG:3300,kd:32,kdSource:'google'},
+    {keyword:'Copilot 구독 가격',intent:'전환',volume:16500,volumeG:11000,kd:18,kdSource:'google'},
+    {keyword:'Cursor AI 다운로드',intent:'전환',volume:27100,volumeG:18200,kd:15,kdSource:'google'},
+    {keyword:'AI 코딩 도구 스타트업',intent:'고려',volume:3300,volumeG:0,kd:20,kdSource:'naver'},
   ]},'AI 코딩 도구');
 }
 
