@@ -27,7 +27,16 @@ exports.handler = async function(event, context) {
   const signature = hmac.digest('base64');
 
   try {
-    const response = await fetch(`https://api.naver.com/keywordstool?hintKeywords=${encodeURIComponent(hintKeyword)}&showDetail=1`, {
+    // 쉼표로 구분된 키워드를 개별 hintKeywords 파라미터로 변환
+    // 네이버 API는 공백 포함 키워드를 거부하므로 공백 제거 후 전송
+    const keywords = hintKeyword
+      .split(',')
+      .map(k => k.trim().replace(/\s+/g, ''))
+      .filter(Boolean)
+      .slice(0, 5);
+    const kwParams = keywords.map(k => `hintKeywords=${encodeURIComponent(k)}`).join('&');
+
+    const response = await fetch(`https://api.naver.com/keywordstool?${kwParams}&showDetail=1`, {
       method: 'GET',
       headers: {
         'X-API-KEY': API_KEY,
