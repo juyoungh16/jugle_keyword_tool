@@ -21,9 +21,6 @@
 
 
 // ── 전역 상태 ────────────────────────────────────────────────
-let savedKeywords = JSON.parse(localStorage.getItem('jugle_keywords')||'[]');
-let sessions = parseInt(localStorage.getItem('jugle_sessions')||'0');
-let currentIntentFilter = 'all';
 let openKebab = null;
 let openIntentDropdown = null;
 // 테이블별 인텐트 필터 상태
@@ -53,7 +50,6 @@ function showPage(id){
   document.querySelectorAll('.nav-item').forEach(item=>{
     if(item.getAttribute('onclick')?.includes("'"+id+"'")) item.classList.add('active');
   });
-  if(id==='saved') renderSaved();
   closeAllKebabs(); closeAllIntentDropdowns();
 }
 
@@ -99,12 +95,13 @@ function updateFilterBadge(tableId, filter) {
 function updateSelectCount(tableId) {
   const checked = document.querySelectorAll(`#${tableId} tbody input.row-checkbox:checked`);
   const countEl = document.getElementById('sel-count-'+tableId);
-  const compareBtn = document.getElementById('sel-compare-btn-'+tableId);
-  const saveBtn = document.getElementById('sel-save-btn-'+tableId);
   if(countEl) countEl.textContent = checked.length;
-  const canCompare = checked.length >= 2;
-  if(compareBtn){ compareBtn.disabled=!canCompare; compareBtn.style.opacity=canCompare?'1':'0.4'; }
-  if(saveBtn){ saveBtn.disabled=checked.length===0; saveBtn.style.opacity=checked.length>0?'1':'0.4'; }
+  // STEP 1→2 버튼
+  const step2Btn = document.getElementById('sel-step2-btn-'+tableId);
+  if(step2Btn){ step2Btn.disabled=checked.length===0; step2Btn.style.opacity=checked.length>0?'1':'0.4'; }
+  // STEP 2→3 버튼
+  const step3Btn = document.getElementById('sel-step3-btn-'+tableId);
+  if(step3Btn){ step3Btn.disabled=checked.length===0; step3Btn.style.opacity=checked.length>0?'1':'0.4'; }
 }
 
 function toggleAllRows(tableId, masterCb) {
@@ -124,26 +121,6 @@ function toggleRow(tableId, cb) {
   updateSelectCount(tableId);
 }
 
-function saveSelected(tableId) {
-  const checked = document.querySelectorAll(`#${tableId} tbody input.row-checkbox:checked`);
-  let count = 0;
-  checked.forEach(cb=>{
-    const row = cb.closest('tr');
-    const kw = row.querySelector('.keyword-cell')?.textContent.trim();
-    const intent = row.dataset.intent;
-    if(kw && intent && !savedKeywords.some(k=>k.keyword===kw)) {
-      savedKeywords.push({keyword:kw, intent, source:'선택저장', savedAt:new Date().toISOString()});
-      count++;
-    }
-    cb.checked = false;
-    row.classList.remove('row-selected');
-  });
-  const master = document.getElementById('master-cb-'+tableId);
-  if(master) master.checked = false;
-  localStorage.setItem('jugle_keywords', JSON.stringify(savedKeywords));
-  updateSavedBadge(); updateSelectCount(tableId);
-  showToast(count ? `${count}개 키워드 저장됨` : '이미 모두 저장됐어요.');
-}
 
 function clearSelection(tableId) {
   document.querySelectorAll(`#${tableId} tbody input.row-checkbox`).forEach(cb=>{
@@ -176,179 +153,6 @@ function makeTableHeader(tableId, cols) {
   return th;
 }
 
-// makeToolbar 제거 — result-summary 안에 통합
-function makeToolbar(tableId) { return ''; }
-
-
-// ── 키워드 비교 ───────────────────────────────────────────────
-async function compareSelected(tableId){
-  const checked = document.querySelectorAll(`#${tableId} tbody input.row-checkbox:checked`);
-  if(checked.length < 2){ alert('2개 이상 선택해주세요.'); return; }
-  const keywords = [];
-  checked.forEach(cb=>{
-    const row = cb.closest('tr');
-    keywords.push({
-      keyword: row.querySelector('.keyword-cell')?.textContent.trim(),
-      intent: row.dataset.intent,
-      volume: parseFloat(row.dataset.volume||0),
-      kd: parseFloat(row.dataset.kd||0),
-    });
-  });
-
-  const modal = document.getElementById('compare-modal');
-  const body = document.getElementById('compare-body');
-  modal.style.display='flex';
-
-  const maxVol = Math.max(...keywords.map(k=>k.volume));
-  const scores = keywords.map(kw=>Math.round((kw.volume/maxVol*50)+((100-kw.kd)/100*50)));
-
-  body.innerHTML=`
-    <!-- 시계열 트렌드 차트 -->
-    <div style="margin-bottom:20px">
-      <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px;font-weight:500;margin-bottom:10px">시간에 따른 관심도 변화 (AI 추론 기반)</div>
-      <div style="position:relative;height:200px;"><canvas id="compare-chart"></canvas></div>
-      <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap" id="chart-legend"></div>
-    </div>
-    <!-- 수치 비교 -->
-    <div style="margin-bottom:20px">
-      <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px;font-weight:500;margin-bottom:10px">수치 비교</div>
-      <div class="kw-table-wrap">
-        <table class="kw-table">
-          <thead><tr><th>키워드</th><th>의도</th><th>Volume</th><th>KD %</th><th>우선순위 점수</th></tr></thead>
-          <tbody>${keywords.map((kw,i)=>`<tr>
-            <td class="keyword-cell">${kw.keyword}</td>
-            <td>${intentPill(kw.intent)}</td>
-            <td class="num-cell">${fmtVol(kw.volume)}</td>
-            <td>${kdBar(kw.kd)}</td>
-            <td><span style="font-family:'Syne',sans-serif;font-size:15px;font-weight:700;color:${scores[i]>=70?'var(--green)':scores[i]>=40?'var(--amber)':'var(--red)'}">${scores[i]}</span><span class="text-xs">/100</span></td>
-          </tr>`).join('')}</tbody>
-        </table>
-      </div>
-    </div>
-    <!-- AI 분석 로딩 -->
-    <div id="ai-analysis-wrap">
-      <div class="loading-wrap" style="padding:20px"><div class="spinner"></div><div class="loading-text">AI 우선순위 분석 중…</div></div>
-    </div>`;
-
-  // Chart.js 라인 차트 그리기
-  _drawCompareChart(keywords);
-
-  // AI 분석 요청
-  const kwList = keywords.map((k,i)=>`${k.keyword}(의도:${k.intent}, Volume:${fmtVol(k.volume)}, KD:${k.kd}, 점수:${scores[i]})`).join(', ');
-  const prompt=`SEO 콘텐츠 전략가. 다음 키워드들을 비교하고 콘텐츠 작성 우선순위를 제안해주세요.
-키워드: ${kwList}
-JSON만: {"analysis":[{"keyword":"키워드","priority":1~${keywords.length},"reason":"우선순위 이유 20자","strategy":"콘텐츠 전략 한 줄"}],"overall_tip":"전체 전략 팁 1~2문장"}`;
-
-  const response = await callClaude(prompt);
-  const wrap = document.getElementById('ai-analysis-wrap');
-  if(!wrap) return;
-  if(!response){ wrap.innerHTML='<div class="text-xs" style="color:var(--text3)">AI 분석을 불러오지 못했어요. 수치 비교를 참고하세요.</div>'; return; }
-  try{
-    const data = JSON.parse(response.replace(/```json|```/g,'').trim());
-    const sorted = [...data.analysis].sort((a,b)=>a.priority-b.priority);
-    wrap.innerHTML=`
-      <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.8px;font-weight:500;margin-bottom:10px">AI 우선순위 분석</div>
-      <div class="banner banner-info" style="margin-bottom:12px"><span>💡</span><span>${data.overall_tip}</span></div>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        ${sorted.map((a,i)=>`
-          <div style="display:flex;align-items:flex-start;gap:12px;padding:11px 14px;background:var(--bg3);border-radius:9px;border-left:3px solid ${i===0?'var(--accent)':i===1?'var(--green)':'var(--border2)'}">
-            <span style="font-family:'Syne',sans-serif;font-size:18px;font-weight:800;color:${i===0?'var(--accent)':i===1?'var(--green)':'var(--text3)'};min-width:20px;line-height:1.2">${a.priority}</span>
-            <div>
-              <div style="font-size:13px;font-weight:500;margin-bottom:3px">${a.keyword}</div>
-              <div class="text-xs" style="margin-bottom:2px">📌 ${a.reason}</div>
-              <div class="text-xs" style="color:var(--accent)">→ ${a.strategy}</div>
-            </div>
-          </div>`).join('')}
-      </div>`;
-  } catch {
-    wrap.innerHTML='<div class="text-xs" style="color:var(--text3)">AI 분석 결과를 처리하지 못했어요.</div>';
-  }
-}
-
-function _drawCompareChart(keywords){
-  // 구글 트렌드 스타일 시계열 차트
-  // 12개월치 AI 추론 데이터 생성 (Volume 기반 노이즈 추가)
-  const months = ['3월','4월','5월','6월','7월','8월','9월','10월','11월','12월','1월','2월'];
-  const COLORS = ['#2563EB','#DC2626','#059669','#D97706','#7C3AED','#DB2777'];
-
-  const datasets = keywords.map((kw, i)=>{
-    const base = Math.round((kw.volume / Math.max(...keywords.map(k=>k.volume))) * 80) + 10;
-    // 시드 기반 의사 랜덤으로 일관된 파형 생성
-    const seed = kw.keyword.split('').reduce((a,c)=>a+c.charCodeAt(0),0);
-    const data = months.map((_,mi)=>{
-      const noise = Math.sin(seed+mi*1.7)*12 + Math.cos(seed*0.3+mi*2.3)*8;
-      return Math.max(5, Math.min(100, Math.round(base + noise)));
-    });
-    return {
-      label: kw.keyword,
-      data,
-      borderColor: COLORS[i % COLORS.length],
-      backgroundColor: COLORS[i % COLORS.length]+'22',
-      borderWidth: 2,
-      pointRadius: 3,
-      pointHoverRadius: 5,
-      tension: 0.4,
-      fill: false,
-    };
-  });
-
-  // 범례
-  const legendEl = document.getElementById('chart-legend');
-  if(legendEl){
-    legendEl.innerHTML = keywords.map((kw,i)=>`
-      <span style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)">
-        <span style="width:20px;height:2.5px;background:${COLORS[i%COLORS.length]};border-radius:2px;display:inline-block"></span>
-        ${kw.keyword}
-      </span>`).join('');
-  }
-
-  // Chart.js 로드 후 그리기
-  if(window.Chart){
-    _renderChart(months, datasets);
-  } else {
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js';
-    script.onload = () => _renderChart(months, datasets);
-    document.head.appendChild(script);
-  }
-}
-
-function _renderChart(labels, datasets){
-  const canvas = document.getElementById('compare-chart');
-  if(!canvas) return;
-  if(window._compareChartInstance){ window._compareChartInstance.destroy(); }
-  window._compareChartInstance = new Chart(canvas, {
-    type: 'line',
-    data: { labels, datasets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode:'index', intersect:false },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y}`
-          }
-        }
-      },
-      scales: {
-        x: {
-          grid: { color:'rgba(0,0,0,0.05)' },
-          ticks: { font:{ size:11 }, color:'#9CA3AF' }
-        },
-        y: {
-          min: 0, max: 100,
-          grid: { color:'rgba(0,0,0,0.05)' },
-          ticks: { font:{ size:11 }, color:'#9CA3AF', stepSize:20 }
-        }
-      }
-    }
-  });
-}
-
-function closeCompareModal(){ document.getElementById('compare-modal').style.display='none'; if(window._compareChartInstance){ window._compareChartInstance.destroy(); window._compareChartInstance=null; } }
-
 function toggleKebab(id, event) {
   event.stopPropagation();
   const menu = document.getElementById('kebab-'+id);
@@ -373,215 +177,73 @@ function kebabLongtail(keyword) {
   showPage('longtail');
   setTimeout(()=>expandLongtail(), 150);
 }
-function makeKebab(id, keyword, intent, source, isSaved) {
-  const saveLabel = isSaved ? '✓ 저장됨' : '💾 저장';
-  const saveStyle = isSaved ? 'color:var(--green)' : '';
+function makeKebab(id, keyword) {
   return `<div class="kebab-wrap">
     <button class="kebab-btn" onclick="toggleKebab('${id}',event)">⋮</button>
     <div class="kebab-menu" id="kebab-${id}">
-      <div class="kebab-item" style="${saveStyle}" onclick="kebabSave('${escStr(keyword)}','${intent||''}','${source||''}',this)">${saveLabel}</div>
-      <div class="kebab-divider"></div>
-      <div class="kebab-item" onclick="kebabLongtail('${escStr(keyword)}')">🌿 롱테일 확장</div>
+      <div class="kebab-item" onclick="kebabLongtail('${escStr(keyword)}')">🌿 STEP 2 확장</div>
     </div>
   </div>`;
 }
 
-function kebabSave(keyword, intent, source, el) {
-  closeAllKebabs();
-  const idx = savedKeywords.findIndex(k=>k.keyword===keyword);
-  if(idx>=0) {
-    savedKeywords.splice(idx,1);
-    el.textContent='💾 저장'; el.style.color='';
-    showToast(`"${keyword}" 저장 해제`);
+// ── STEP 간 연결 ────────────────────────────────────────────────
+
+// STEP 1 → STEP 2: 선택 키워드(또는 전체)를 씨앗으로 넘김
+function sendDiscToLongtail(selectAll) {
+  let keywords = [];
+  if (selectAll) {
+    keywords = _lastDiscKeywords.map(k => k.keyword);
+    // 전체 선택 시 checkbox도 모두 체크
+    const TID = 'disc-result-table';
+    const master = document.getElementById('master-cb-' + TID);
+    if (master) { master.checked = true; toggleAllRows(TID, master); }
   } else {
-    savedKeywords.push({keyword, intent, source, savedAt:new Date().toISOString()});
-    el.textContent='✓ 저장됨'; el.style.color='var(--green)';
-    showToast(`"${keyword}" 저장됨`);
+    const checked = document.querySelectorAll('#disc-result-table tbody input.row-checkbox:checked');
+    if (!checked.length) { showToast('키워드를 선택하거나 "전체 → STEP 2" 버튼을 눌러주세요.'); return; }
+    checked.forEach(cb => {
+      const kw = cb.closest('tr').querySelector('.keyword-cell')?.textContent.trim();
+      if (kw) keywords.push(kw);
+    });
   }
-  localStorage.setItem('jugle_keywords', JSON.stringify(savedKeywords));
-  updateSavedBadge();
+  if (!keywords.length) { showToast('발굴된 키워드가 없어요.'); return; }
+  document.getElementById('seed-keyword').value = keywords.slice(0, 5).join(', ');
+  showPage('longtail');
+  setTimeout(() => expandLongtail(), 100);
 }
 
-// ── 트렌드 탐색 ───────────────────────────────────────────────
-function selectTSeg(el){ document.querySelectorAll('.tseg').forEach(b=>b.classList.remove('active')); el.classList.add('active'); const isOther=el.dataset.val==='other'; document.getElementById('trend-other-input').style.display=isOther?'block':'none'; document.getElementById('trend-spacer').style.display=isOther?'none':'block'; }
-
-function selectPlatform(el){
-  document.querySelectorAll('#platform-switch .psw-btn').forEach(b=>b.classList.remove('active','active-naver'));
-  const isGoogle = el.dataset.val==='google';
-  el.classList.add(isGoogle ? 'active' : 'active-naver');
-  
-  document.querySelectorAll('.range-btn').forEach(b=>{
-    if(!isGoogle && b.dataset.range && b.dataset.range !== '1m') {
-      b.disabled = true; // 네이버는 기존대로 1m만 활성화
-    } else {
-      b.disabled = isGoogle; // 구글은 모두 비활성, 네이버는 개수 버튼 모두 활성
-    }
-  });
-
-  document.getElementById('range-note').textContent = isGoogle
-    ? 'Google Trends 실시간 · KR (개수/기간 선택 불가)'
-    : '네이버: 최근 1개월 고정 · 개수 조절 가능';
-}
-
-function selectRange(el){
-  if(el.disabled) return;
-  document.querySelectorAll('.range-btn').forEach(b=>b.classList.remove('active'));
-  el.classList.add('active');
-}
-
-function getCurrentPlatform(){ return document.querySelector('#platform-switch .psw-btn.active, #platform-switch .psw-btn.active-naver')?.dataset.val==='google'?'구글':'네이버'; }
-function getCurrentRange(){ return document.querySelector('.range-btn.active')?.dataset.range||'1m'; }
-
-function selectCount(el){
-  document.querySelectorAll('[data-count]').forEach(b=>b.classList.remove('active'));
-  el.classList.add('active');
-}
-function getCurrentCount(){ return parseInt(document.querySelector('[data-count].active')?.dataset.count||'10'); }
-
-async function exploreTrend(){
-  const activeSeg=document.querySelector('.tseg.active');
-  let category=activeSeg?.dataset.val==='other'?document.getElementById('trend-other-input').value.trim():'IT/테크';
-  if(!category){alert('분야를 입력해주세요.');return;}
-  const platform=getCurrentPlatform();
-  const range=getCurrentRange();
-  const count=getCurrentCount();
-  const rangeLabel=platform==='구글'?'실시간':({'7d':'최근 7일','1m':'최근 1개월','3m':'최근 3개월','12m':'최근 12개월'}[range]);
-  const result=document.getElementById('trend-result');
-  sessions++; localStorage.setItem('jugle_sessions',sessions);
-
-  if (platform === '구글') {
-    result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">Google Trends 실시간 RSS 가져오는 중…</div></div></div>`;
-    try {
-      const rssRes = await fetch('/.netlify/functions/google-trends');
-      const rssData = await rssRes.json();
-      if(!rssData.keywords || !rssData.keywords.length) throw new Error("RSS 응답이 비어있습니다.");
-      
-      result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">Google Trends 주요 키워드를 "${category}" 분야 관점에서 AI 분석 중…</div></div></div>`;
-      const rssListStr = rssData.keywords.map(k => `- ${k.keyword} (트래픽: ${k.traffic_str}, 뉴스: ${k.news_title})`).join('\n');
-      
-      const gPrompt = `한국 IT/테크 SEO 전문가. 아래는 현재 구글 코리아 실시간 급상승 검색어 TOP 20입니다.
-이 중에서 "${category}" 분야와 직간접적으로 연관 지을 수 있는 키워드만 엄선하여 분석하세요. (다수 연관 시 모두, 없으면 최대한 억지스럽지 않은 선에서 1~2개라도 도출)
-
-실시간 검색어:
-${rssListStr}
-
-반드시 JSON만 출력하세요 (설명 없이):
-{"platform":"구글","category":"${category}","range":"실시간","keywords":[
-  {"keyword":"키워드","intent":"인지|고려|전환","volume":숫자(트래픽의 숫자만),"reason":"급상승 이유(제공된 뉴스참고 20자)","related":["연관키워드1","연관키워드2","연관키워드3","연관키워드4","연관키워드5"]}
-]}`;
-
-      const response = await callClaude(gPrompt); if(!response) return;
-      let cleanJson = response.replace(/```json|```/g,'').trim();
-      if (!cleanJson.endsWith("}")) cleanJson = cleanJson.replace(/,([^,]*)$/, '') + "]}";
-      const data = JSON.parse(cleanJson);
-      data.platform = '구글';
-      data.range = '실시간';
-      renderTrendCards(data);
-    } catch(e) {
-      result.innerHTML=`<div class="card"><div class="stream-box">오류: ${e.message}</div></div>`;
-    }
-    return;
+// STEP 2 → STEP 3: 선택 키워드(또는 전체)를 토픽으로 넘김
+function sendLongtailToStrategy(selectAll) {
+  let keywords = [];
+  if (selectAll) {
+    document.querySelectorAll('#lt-table tbody tr').forEach(row => {
+      const kw = row.querySelector('.keyword-cell')?.textContent.trim();
+      if (kw) keywords.push(kw);
+    });
+  } else {
+    const checked = document.querySelectorAll('#lt-table tbody input.row-checkbox:checked');
+    if (!checked.length) { showToast('키워드를 선택하거나 "전체 → STEP 3" 버튼을 눌러주세요.'); return; }
+    checked.forEach(cb => {
+      const kw = cb.closest('tr').querySelector('.keyword-cell')?.textContent.trim();
+      if (kw) keywords.push(kw);
+    });
   }
-
-  // --- 네이버 (기존 로직 유지) ---
-  result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">${platform} · ${category} 트렌드 분석 중… (${count}개)</div></div></div>`;
-
-  const prompt=`한국 IT/테크 SEO 전문가. ${platform} 기준 "${category}" 분야에서 ${rangeLabel} 동안 검색량이 높거나 급상승한 트렌드 키워드 ${count}개를 분석해주세요.
-
-반드시 JSON만 출력하세요 (설명 없이):
-{"platform":"${platform}","category":"${category}","range":"${rangeLabel}","keywords":[
-  {"keyword":"키워드","intent":"인지|고려|전환","volume":숫자,"reason":"급상승 이유 20자 이내","related":["연관키워드1","연관키워드2","연관키워드3","연관키워드4","연관키워드5"]}
-]}
-- volume: 네이버 월간 검색량 절댓값 추정(PC+모바일 합산)
-- related: 이 키워드와 함께 검색되는 연관 키워드 5개 (짧고 간결하게)`;
-
-  const response=await callClaude(prompt); if(!response) return;
-  try{
-    let cleanJson = response.replace(/```json|```/g,'').trim();
-    // AI 출력 초과로 JSON이 중간에 잘린 경우를 복구하기 위한 최후의 방어
-    if (!cleanJson.endsWith("}")) {
-      cleanJson = cleanJson.replace(/,([^,]*)$/, '') + "]}";
-    }
-    
-    const data=JSON.parse(cleanJson);
-    data.range=rangeLabel;
-    
-    if (data.platform === '네이버') {
-      const totalKws = data.keywords.length;
-      result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text" id="api-progress">네이버 API 연동 중… (0/${totalKws})</div></div></div>`;
-      
-      // 5개 단위 청크
-      const kwChunks = [];
-      for (let i = 0; i < totalKws; i += 5) {
-        kwChunks.push(data.keywords.slice(i, i + 5));
-      }
-      
-      let processed = 0;
-      for (const chunk of kwChunks) {
-        const hintKeywords = chunk.map(k => k.keyword.replace(/[^a-zA-Z0-9가-힣\s]/g, '')).filter(k=>k).join(',');
-        const keywordsOnly = chunk.map(k => k.keyword);
-        
-        let p1 = Promise.resolve();
-        let p2 = Promise.resolve();
-        
-        if (hintKeywords) {
-          p1 = fetch(`/.netlify/functions/naver-keyword?hintKeyword=${encodeURIComponent(hintKeywords)}`)
-               .then(res => res.ok ? res.json() : null).catch(() => null);
-        }
-        p2 = fetch('/.netlify/functions/naver-datalab', {
-          method: 'POST', body: JSON.stringify({ keywords: keywordsOnly })
-        }).then(res => res.ok ? res.json() : null).catch(() => null);
-
-        const [apiData, dlData] = await Promise.all([p1, p2]);
-
-        if (apiData && apiData.keywordList) {
-          for (const kw of chunk) {
-            const cleanKw = kw.keyword.replace(/ /g,'');
-            const exact = apiData.keywordList.find(k => k.relKeyword.replace(/ /g,'') === cleanKw);
-            if (exact) {
-              const pc = typeof exact.monthlyPcQcCnt === 'number' ? exact.monthlyPcQcCnt : 10;
-              const mo = typeof exact.monthlyMobileQcCnt === 'number' ? exact.monthlyMobileQcCnt : 10;
-              kw.volume = pc + mo;
-              kw.isRealData = true;
-            }
-          }
-        }
-        if (dlData) {
-          for (const kw of chunk) {
-            if (dlData[kw.keyword]) {
-              kw.sparkline = dlData[kw.keyword].ratios;
-              kw.trend = dlData[kw.keyword].trend;
-            }
-          }
-        }
-        
-        processed += chunk.length;
-        const progressEl = document.getElementById('api-progress');
-        if (progressEl) progressEl.textContent = `네이버 API 연동 중… (${processed}/${totalKws})`;
-        
-        // Rate Limit (초당 검색광고 5회, 데이터랩 10회 방어) 딜레이
-        await new Promise(r => setTimeout(r, 200));
-      }
-    }
-
-    renderTrendCards(data);
-  } catch(e){ result.innerHTML=`<div class="card"><div class="stream-box">${response}</div></div>`; }
+  if (!keywords.length) { showToast('확장된 키워드가 없어요.'); return; }
+  document.getElementById('topic-keywords').value = keywords.slice(0, 5).join(', ');
+  showPage('strategy');
+  setTimeout(() => generateTopicCluster(), 100);
 }
 
-// 스파크라인 SVG 생성
+// ── 스파크라인 SVG ────────────────────────────────────────────
 function makeSparkline(values, color){
   if(!values||!values.length) return '';
   const w=80, h=28, pad=2;
-  const max=Math.max(...values,1);
-  const min=Math.min(...values);
+  const max=Math.max(...values,1), min=Math.min(...values);
   const range=max-min||1;
   const pts=values.map((v,i)=>{
     const x=pad+(i/(values.length-1))*(w-pad*2);
     const y=h-pad-((v-min)/range)*(h-pad*2);
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
-  // 면적 채우기 경로
-  const first=values.map((_,i)=>i===0)[0];
   const areaStart=`${pad.toFixed(1)},${(h-pad).toFixed(1)}`;
   const areaEnd=`${(w-pad).toFixed(1)},${(h-pad).toFixed(1)}`;
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="flex-shrink:0">
@@ -591,168 +253,12 @@ function makeSparkline(values, color){
   </svg>`;
 }
 
-function renderTrendCards(data){
-  const TID='trend-table';
-  const result=document.getElementById('trend-result');
-  const kws=data.keywords||[];
-  tableIntentFilter[TID]=null;
-  const platIcon=data.platform==='네이버'?'🇰🇷':'🌐';
-
-  const intentColor={'인지':'#0284C7','고려':'#CA8A04','전환':'#16A34A'};
-
-  let html=`
-    <div class="result-summary">
-      <span>${platIcon} <strong>${data.platform}</strong> · ${data.category}</span>
-      <span class="text-xs">📅 ${data.range||'최근 1개월'}</span>
-      <span>총 <strong>${kws.length}개</strong></span>
-      <span class="text-xs" style="color:${data.platform==='네이버'?'var(--green)':'#2563EB'};background:${data.platform==='네이버'?'var(--green-lt)':'#DBEAFE'};padding:2px 7px;border-radius:4px;border:1px solid ${data.platform==='네이버'?'#BBF7D0':'#BFDBFE'};">${data.platform==='네이버'?'📊 네이버 실제 데이터':'📡 Google Trends 실시간'}</span>
-      <div class="result-actions">
-        <button class="btn btn-secondary btn-sm" id="sel-compare-btn-${TID}" onclick="compareSelected('${TID}')" disabled style="opacity:0.4">⚖️ 비교 (<span id="sel-count-${TID}">0</span>)</button>
-        <button class="btn btn-secondary btn-sm" id="sel-save-btn-${TID}" onclick="saveSelected('${TID}')" disabled style="opacity:0.4">💾 선택 저장</button>
-        <button class="btn btn-secondary btn-sm" onclick="saveAllTrend()">+ 전체 저장</button>
-      </div>
-    </div>
-    <div class="kw-table-wrap">
-      <table class="kw-table" id="${TID}">
-        <thead><tr>
-          <th style="width:36px"><input type="checkbox" class="th-checkbox" id="master-cb-${TID}" onchange="_trendMasterCheck(this)"></th>
-          <th>키워드</th>
-          <th style="width:70px">의도</th>
-          ${data.platform==='네이버'?'<th style="width:90px">12주 추이</th>':''}
-          <th style="width:110px">${data.platform==='네이버'?'검색량':'트래픽'}</th>
-          <th>급상승 이유</th>
-          <th>연관 키워드</th>
-          <th style="width:36px"></th>
-        </tr></thead>
-        <tbody>`;
-
-  kws.forEach((kw,idx)=>{
-    const isSaved=savedKeywords.some(k=>k.keyword===kw.keyword);
-    const ic=intentColor[kw.intent]||'#64748B';
-    const related=(kw.related||[]);
-    const spark = data.platform==='네이버' ? `<td style="padding:8px 12px">${makeSparkline(kw.sparkline||[], ic)}</td>` : '';
-    
-    html+=`<tr data-volume="${kw.volume}" data-kd="0" data-intent="${kw.intent}" id="tr-${TID}-${idx}">
-      <td><input type="checkbox" class="row-checkbox" onchange="_trendRowCheck('${TID}',this)"></td>
-      <td class="keyword-cell" style="font-weight:500">${kw.keyword}</td>
-      <td>${intentPill(kw.intent)}</td>
-      ${spark}
-      <td class="num-cell">${fmtVol(kw.volume)}${data.platform==='구글'?'+':''}</td>
-      <td class="text-xs" style="color:var(--text2);line-height:1.4">${kw.reason||'-'}</td>
-      <td style="padding:10px 12px">
-        <div style="display:flex;flex-wrap:wrap;gap:4px">
-          ${related.map(r=>`<span style="font-size:10px;padding:2px 7px;background:var(--bg3);border-radius:10px;color:var(--text2);cursor:pointer;white-space:nowrap;border:1px solid var(--border)"
-            onclick="kebabLongtail('${escStr(r)}')" title="${r}으로 키워드 확장">${r}</span>`).join('')}
-        </div>
-      </td>
-      <td>${makeKebab('t'+idx,kw.keyword,kw.intent,'트렌드탐색',isSaved)}</td>
-    </tr>`;
-  });
-
-  html+=`</tbody></table></div>`;
-  result.innerHTML=html;
-}
-
-// 검색량 기반 의사 스파크라인 생성 (API 없을 때)
-function genSparkline(volume){
-  const seed=volume%997;
-  return Array.from({length:24},(_,i)=>{
-    const base=50+Math.round(Math.sin(seed*0.1+i*0.8)*18+Math.cos(seed*0.2+i*0.5)*12);
-    return Math.max(5,Math.min(100,base));
-  });
-}
-
-function _trendMasterCheck(masterCb){
-  document.querySelectorAll('#trend-table tbody input.row-checkbox').forEach(cb=>{
-    cb.checked=masterCb.checked;
-  });
-  _updateTrendSelCount();
-}
-function _trendRowCheck(TID, cb){
-  const master=document.getElementById('master-cb-'+TID);
-  const all=document.querySelectorAll(`#${TID} tbody input.row-checkbox`);
-  if(master) master.checked=[...all].every(c=>c.checked);
-  _updateTrendSelCount();
-}
-function _updateTrendSelCount(){
-  const TID='trend-table';
-  const checked=document.querySelectorAll(`#${TID} tbody input.row-checkbox:checked`);
-  const countEl=document.getElementById('sel-count-'+TID);
-  const compareBtn=document.getElementById('sel-compare-btn-'+TID);
-  const saveBtn=document.getElementById('sel-save-btn-'+TID);
-  if(countEl) countEl.textContent=checked.length;
-  if(compareBtn){ compareBtn.disabled=checked.length<2; compareBtn.style.opacity=checked.length>=2?'1':'0.4'; }
-  if(saveBtn){ saveBtn.disabled=checked.length===0; saveBtn.style.opacity=checked.length>0?'1':'0.4'; }
-}
-
-function saveAllTrend(){
-  const rows=document.querySelectorAll('#trend-table tbody tr');
-  let count=0;
-  rows.forEach(row=>{
-    const kw=row.querySelector('.keyword-cell')?.textContent.trim();
-    const intent=row.dataset.intent;
-    if(kw&&intent&&!savedKeywords.some(k=>k.keyword===kw)){
-      savedKeywords.push({keyword:kw,intent,source:'트렌드탐색',savedAt:new Date().toISOString()});
-      count++;
-    }
-  });
-  localStorage.setItem('jugle_keywords',JSON.stringify(savedKeywords));
-  updateSavedBadge();
-  showToast(count?`${count}개 저장됨`:'이미 모두 저장됐어요.');
-}
-
-function demoTrend(){
-  renderTrendCards({platform:'네이버',category:'IT/테크',range:'최근 1개월',keywords:[
-    {keyword:'AI 코딩 도구',intent:'고려',volume:49500,
-      reason:'Cursor·Copilot 경쟁 심화로 비교 검색 급증',
-      related:['Cursor AI','GitHub Copilot','코드 자동완성'],
-      sparkline:[42,45,43,48,55,62,70,75,78,80,82,79,75,72,68,65,70,74,80,85,88,90,87,82]},
-    {keyword:'LLM 프롬프트 엔지니어링',intent:'인지',volume:33100,
-      reason:'AI 도입 기업 증가로 실무 적용 방법 탐색',
-      related:['프롬프트 작성법','ChatGPT 활용','Claude 사용법'],
-      sparkline:[30,32,35,38,40,42,45,50,55,60,62,65,68,65,62,58,60,64,68,72,75,73,70,68]},
-    {keyword:'Claude API 사용법',intent:'인지',volume:18200,
-      reason:'Anthropic 신모델 출시 이후 관심 급증',
-      related:['Anthropic API','Claude 3.5','API 키 발급'],
-      sparkline:[20,22,25,28,32,38,45,50,55,58,60,62,60,58,55,52,55,58,62,65,68,70,68,65]},
-    {keyword:'AI 에이전트 만들기',intent:'인지',volume:13200,
-      reason:'자율 AI 에이전트 트렌드 확산',
-      related:['LangChain','AutoGPT','AI 자동화'],
-      sparkline:[25,28,30,35,40,45,50,55,58,60,62,65,68,65,62,58,60,62,65,68,70,72,70,68]},
-    {keyword:'Cursor 구독 신청',intent:'전환',volume:27100,
-      reason:'Cursor Pro 기능 확대 후 전환 사용자 증가',
-      related:['Cursor 가격','Cursor Pro','Cursor 무료'],
-      sparkline:[35,38,40,45,52,60,68,75,80,82,85,88,85,82,78,75,78,82,85,88,90,92,90,88]},
-    {keyword:'RAG 구현 방법',intent:'인지',volume:22000,
-      reason:'기업 AI 도입 시 RAG 파이프라인 수요',
-      related:['벡터DB','LangChain RAG','임베딩'],
-      sparkline:[18,20,22,25,28,32,38,42,45,48,50,52,50,48,45,42,45,48,50,52,55,53,50,48]},
-    {keyword:'ChatGPT API 가격',intent:'인지',volume:40500,
-      reason:'OpenAI 가격 정책 변경으로 비교 검색 증가',
-      related:['GPT-4 가격','OpenAI 요금제','Claude API 비교'],
-      sparkline:[50,52,55,58,62,68,72,75,78,80,82,80,78,75,72,70,72,75,78,80,82,80,78,75]},
-    {keyword:'벡터DB 비교',intent:'고려',volume:9900,
-      reason:'RAG 파이프라인 구축 증가로 DB 선택 탐색',
-      related:['Pinecone','Weaviate','ChromaDB'],
-      sparkline:[15,17,19,22,25,28,32,35,38,40,42,45,42,40,38,35,38,40,42,45,47,45,42,40]},
-    {keyword:'GitHub Copilot 무료체험',intent:'전환',volume:16500,
-      reason:'무료 플랜 출시 이후 체험 사용자 급증',
-      related:['Copilot 무료','VS Code 확장','Copilot 설정'],
-      sparkline:[28,30,32,35,40,45,50,55,58,60,62,65,62,60,58,55,58,60,62,65,68,66,63,60]},
-    {keyword:'AI 개발 스택 추천',intent:'고려',volume:14400,
-      reason:'풀스택 AI 개발 관심으로 기술 스택 탐색',
-      related:['LangChain','FastAPI','Next.js AI'],
-      sparkline:[22,24,26,28,32,36,40,44,46,48,50,52,50,48,46,44,46,48,50,52,54,52,50,48]},
-  ]});
-}
-
 // ── 롱테일 확장 ───────────────────────────────────────────────
 async function expandLongtail(){
   const seeds=document.getElementById('seed-keyword').value.trim();
   if(!seeds){alert('씨앗 키워드를 입력해주세요.');return;}
   const result=document.getElementById('longtail-result');
   result.innerHTML=`<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text">네이버 검색광고 API에서 "${seeds}" 연관 키워드 조회 중…</div></div></div>`;
-  sessions++; localStorage.setItem('jugle_sessions',sessions);
   
   try {
     // 쉼표로 나눈 첫 번째 키워드를 사용하되 특수문자는 제거 (네이버 검색광고 API 에러 방지)
@@ -831,9 +337,8 @@ function renderLongtailTable(data,seeds){
       <span>${Object.entries(counts).filter(([,v])=>v>0).map(([k,v])=>`<span class="intent-pill ${INTENTS[k].cls}">${k} ${v}</span>`).join(' ')}</span>
       <span class="text-xs" style="color:var(--green);background:var(--green-lt);padding:2px 7px;border-radius:4px;border:1px solid #BBF7D0;">✅ 실제 검색량</span>
       <div class="result-actions">
-        <button class="btn btn-secondary btn-sm" id="sel-compare-btn-${TID}" onclick="compareSelected('${TID}')" disabled style="opacity:0.4">⚖️ 비교 (<span id="sel-count-${TID}">0</span>)</button>
-        <button class="btn btn-secondary btn-sm" id="sel-save-btn-${TID}" onclick="saveSelected('${TID}')" disabled style="opacity:0.4">💾 선택 저장</button>
-        <button class="btn btn-secondary btn-sm" onclick="saveAllVisible('${TID}')">+ 전체 저장</button>
+        <button class="btn btn-secondary btn-sm" id="sel-step3-btn-${TID}" onclick="sendLongtailToStrategy(false)" disabled style="opacity:0.4">→ STEP 3 클러스터 (<span id="sel-count-${TID}">0</span>)</button>
+        <button class="btn btn-primary btn-sm" onclick="sendLongtailToStrategy(true)">전체 → STEP 3</button>
       </div>
     </div>
     <div class="kw-table-wrap">
@@ -847,10 +352,9 @@ function renderLongtailTable(data,seeds){
       ])}</thead>
       <tbody id="lt-tbody">`;
   kws.forEach((kw,idx)=>{
-    const isSaved=savedKeywords.some(k=>k.keyword===kw.keyword);
     const sparkColor={'인지':'#0284C7','고려':'#CA8A04','전환':'#16A34A'}[kw.intent] || '#64748B';
     const trendHtml = kw.sparkline ? `<div style="display:flex;align-items:center;gap:6px">${makeSparkline(kw.sparkline, sparkColor)}</div>` : '-';
-    
+
     html+=`<tr data-volume="${kw.volume}" data-kd="${kw.kd}" data-intent="${kw.intent}">
       <td><input type="checkbox" class="row-checkbox" onchange="toggleRow('${TID}',this)"></td>
       <td class="keyword-cell">${kw.keyword}</td>
@@ -858,7 +362,7 @@ function renderLongtailTable(data,seeds){
       <td class="num-cell">${fmtVol(kw.volume)}</td>
       <td style="padding:6px 12px;">${trendHtml}</td>
       <td>${kdBar(kw.kd)}</td>
-      <td>${makeKebab('l'+idx,kw.keyword,kw.intent,'롱테일확장',isSaved)}</td>
+      <td>${makeKebab('l'+idx,kw.keyword)}</td>
     </tr>`;
   });
   html+=`</tbody></table></div>`;
@@ -882,26 +386,6 @@ function demoLongtail(){
     {keyword:'AI 코딩 도구 스타트업',intent:'고려',volume:3300,kd:20},
   ]},'AI 코딩 도구');
 }
-
-// ── 연관키워드 탐색 ───────────────────────────────────────────
-// ── 저장함 ────────────────────────────────────────────────────
-function renderSaved(){
-  const list=document.getElementById('saved-list');
-  const filtered=currentIntentFilter==='all'?savedKeywords:savedKeywords.filter(k=>k.intent===currentIntentFilter);
-  if(!filtered.length){ list.innerHTML=`<div class="empty-state"><div class="empty-icon">📭</div><div style="font-size:13px">저장된 키워드가 없어요.</div></div>`; return; }
-  list.innerHTML=`<div class="kw-table-wrap"><table class="kw-table">
-    <thead><tr><th>키워드</th><th>의도</th><th>출처</th><th>저장일</th><th></th></tr></thead>
-    <tbody>${filtered.map(kw=>`<tr>
-      <td class="keyword-cell">${kw.keyword}</td>
-      <td>${intentPill(kw.intent)}</td>
-      <td class="text-xs">${kw.source||'-'}</td>
-      <td class="text-xs">${new Date(kw.savedAt).toLocaleDateString('ko-KR')}</td>
-      <td><button class="btn btn-ghost" style="color:var(--red);font-size:11px;padding:3px 7px" onclick="removeKeyword('${escStr(kw.keyword)}')">삭제</button></td>
-    </tr>`).join('')}
-    </tbody></table></div>`;
-}
-function removeKeyword(kw){ savedKeywords=savedKeywords.filter(k=>k.keyword!==kw); localStorage.setItem('jugle_keywords',JSON.stringify(savedKeywords)); updateSavedBadge();renderSaved(); }
-function filterIntent(intent,el){ currentIntentFilter=intent; document.querySelectorAll('#intent-filters .intent-btn').forEach(b=>b.className='intent-btn'); el.className='intent-btn '+(intent==='all'?'f-all':'f-'+intent); renderSaved(); }
 
 // ── 콘텐츠 전략 ───────────────────────────────────────────────
 async function generateTopicCluster(){
@@ -1054,42 +538,6 @@ function demoTopicCluster(){
   });
 }
 
-function saveAllVisible(tableId){
-  // 트렌드 탐색은 카드 방식
-  if(tableId==='trend-table'){
-    const cards = document.querySelectorAll('#trend-table-cards [id^="tcard-"]');
-    let count=0;
-    cards.forEach(card=>{
-      const kwEl=card.querySelector('[style*="font-size:15px"]');
-      const intent=card.dataset.intent;
-      if(kwEl&&intent){
-        const kw=kwEl.textContent.trim();
-        if(!savedKeywords.some(k=>k.keyword===kw)){
-          savedKeywords.push({keyword:kw,intent,source:'트렌드탐색',savedAt:new Date().toISOString()});
-          count++;
-        }
-      }
-    });
-    localStorage.setItem('jugle_keywords',JSON.stringify(savedKeywords));
-    updateSavedBadge();
-    showToast(count?`${count}개 저장됨`:'이미 모두 저장됐어요.');
-    return;
-  }
-  // 일반 테이블
-  const rows=document.querySelectorAll(`#${tableId} tbody tr:not([style*="none"])`);
-  let count=0;
-  rows.forEach(row=>{
-    const kw=row.querySelector('.keyword-cell')?.textContent.trim();
-    const intent=row.dataset.intent;
-    if(kw&&intent&&!savedKeywords.some(k=>k.keyword===kw)){
-      savedKeywords.push({keyword:kw,intent,source:'전체저장',savedAt:new Date().toISOString()});
-      count++;
-    }
-  });
-  localStorage.setItem('jugle_keywords',JSON.stringify(savedKeywords));
-  updateSavedBadge();showToast(count?`${count}개 저장됨`:'이미 모두 저장됐어요.');
-}
-
 // ── 테이블 정렬 ───────────────────────────────────────────────
 function sortTable(tableId,col,th){
   const table=document.getElementById(tableId); if(!table) return;
@@ -1124,11 +572,7 @@ function saveApiKey(){const key=document.getElementById('api-key-input').value.t
 function clearApiKey(){localStorage.removeItem('jugle_api_key');document.getElementById('api-key-input').value='';updateApiStatus(false);}
 function toggleKeyVisibility(){const input=document.getElementById('api-key-input');input.type=input.type==='password'?'text':'password';}
 function updateApiStatus(connected){document.getElementById('api-dot').className=connected?'api-dot on':'api-dot';document.getElementById('api-status-text').textContent=connected?'API 연결됨':'API 키 미설정';}
-function exportJSON(){const blob=new Blob([JSON.stringify({keywords:savedKeywords,exportedAt:new Date().toISOString(),version:'4.0'},null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`jugle-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();}
-function importJSON(e){const file=e.target.files[0];if(!file)return;const reader=new FileReader();reader.onload=ev=>{try{const data=JSON.parse(ev.target.result);const incoming=data.keywords||[];const merged=[...savedKeywords];incoming.forEach(kw=>{if(!merged.find(k=>k.keyword===kw.keyword))merged.push(kw);});savedKeywords=merged;localStorage.setItem('jugle_keywords',JSON.stringify(savedKeywords));updateSavedBadge();alert(`✅ ${incoming.length}개 키워드를 가져왔어요.`);renderSaved();}catch{alert('올바른 Jugle JSON 파일이 아니에요.');}};reader.readAsText(file);e.target.value='';}
-
-// ── 통계/배지/유틸 ───────────────────────────────────────────
-function updateSavedBadge(){const b=document.getElementById('saved-count-badge');b.style.display=savedKeywords.length?'inline':'none';b.textContent=savedKeywords.length;}
+// ── 유틸 ────────────────────────────────────────────────────
 function showToast(msg){const t=document.createElement('div');t.style.cssText='position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:9px 18px;border-radius:8px;font-size:13px;z-index:9999;box-shadow:0 4px 14px rgba(0,0,0,0.2)';t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),2200);}
 function showMsg(containerId,msg,type){const el=document.getElementById(containerId);if(!el)return;el.innerHTML=`<div class="banner banner-${type}" style="margin-top:10px">${msg}</div>`;setTimeout(()=>{el.innerHTML='';},3500);}
 function escStr(s){return s.replace(/'/g,"\\'").replace(/"/g,'&quot;');}
@@ -1136,8 +580,6 @@ function escStr(s){return s.replace(/'/g,"\\'").replace(/"/g,'&quot;');}
 (function init(){
   const key=getApiKey();
   if(key){document.getElementById('api-key-input').value=key;updateApiStatus(true);}
-  updateSavedBadge();
-  // 이전 발굴 결과 복원 버튼 설정
   _initDiscoverPrevButton();
 })();
 
@@ -1556,7 +998,6 @@ function renderDiscoverTable(keywords) {
   const maxVolN = Math.max(...keywords.map(k => k.volumeN || 0), 1);
 
   const rows = keywords.map(kw => {
-    const isSaved = savedKeywords.some(s => s.keyword === kw.keyword);
     const kdClass = kw.kd === null ? '' : kw.kd <= 30 ? 'kd-low' : kw.kd <= 60 ? 'kd-mid' : 'kd-high';
     const kdHtml = kw.kd !== null ? `<span class="kd-dot ${kdClass}"></span>${kw.kd}` : '-';
     const volNHtml = kw.volumeN > 0 ? fmtVol(kw.volumeN) : '-';
@@ -1590,7 +1031,7 @@ function renderDiscoverTable(keywords) {
       <td style="white-space:nowrap">${kdHtml}</td>
       <td><div class="src-badges">${srcBadges}</div></td>
       <td class="disc-star-cell">${_starsHtml(kw.score||0)}</td>
-      <td>${makeKebab('d'+keywords.indexOf(kw), kw.keyword, kw.intent, '키워드발굴', isSaved)}</td>
+      <td>${makeKebab('d'+keywords.indexOf(kw), kw.keyword)}</td>
     </tr>`;
   }).join('');
 
@@ -1599,9 +1040,8 @@ function renderDiscoverTable(keywords) {
     <div class="result-summary">
       <span>총 <strong>${keywords.length}개</strong> 키워드 발굴</span>
       <div class="result-actions">
-        <button class="btn btn-secondary btn-sm" id="sel-compare-btn-${TID}" onclick="compareSelected('${TID}')" disabled style="opacity:0.4">⚖️ 비교 (<span id="sel-count-${TID}">0</span>)</button>
-        <button class="btn btn-secondary btn-sm" id="sel-save-btn-${TID}" onclick="saveSelected('${TID}')" disabled style="opacity:0.4">💾 선택 저장</button>
-        <button class="btn btn-secondary btn-sm" onclick="saveAllVisible('${TID}')">+ 전체 저장</button>
+        <button class="btn btn-secondary btn-sm" id="sel-step2-btn-${TID}" onclick="sendDiscToLongtail(false)" disabled style="opacity:0.4">→ STEP 2 확장 (<span id="sel-count-${TID}">0</span>)</button>
+        <button class="btn btn-primary btn-sm" onclick="sendDiscToLongtail(true)">전체 → STEP 2</button>
       </div>
     </div>
     <div class="kw-table-wrap">
