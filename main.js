@@ -1241,128 +1241,72 @@ function _recomputeStars() {
   });
 }
 
-// ── 메인 파이프라인 ──
+// ── 메인 파이프라인 (통합 버전) ──
 async function discoverKeywords() {
-  const activeTab = document.querySelector('.disc-tab-btn.active')?.dataset.tab || 'product';
   const result = document.getElementById('discover-result');
-  result.innerHTML = `<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text" id="disc-prog">소스 분석 중…</div></div></div>`;
+  result.innerHTML = `<div class="card"><div class="loading-wrap"><div class="spinner"></div><div class="loading-text" id="disc-prog">소스 확인 중…</div></div></div>`;
 
-  let extractedText = '';
-  let sourceLabel = '';
-  let urlSources = []; // [{url, label}]
-  let articles = [];
+  // 각 소스별 키워드 추출 결과를 담을 배열
+  // [{keyword, intent, reason, sources:[], urlSources:[], articles:[], serpItems:[]}]
+  let allExtracted = []; // 소스별로 수집된 원시 키워드 결과 (소스별 배열)
+  let anySource = false;
 
   try {
-    if (activeTab === 'product') {
-      sourceLabel = 'AI';
-      const textArea = document.getElementById('disc-product-text').value.trim();
-      let fileTexts = '';
-      for (const df of _discFiles) {
-        const ext = df.name.split('.').pop().toLowerCase();
-        if (['jpg','jpeg','png'].includes(ext)) {
-          // Vision API 경유
-          const b64 = await _fileToBase64(df.file);
-          fileTexts += `\n[이미지: ${df.name}]\n`;
-          // 이미지는 별도로 Claude Vision으로 처리
-          const visionText = await _extractImageText(b64, df.name);
-          fileTexts += visionText;
-        } else {
-          const fd = new FormData();
-          fd.append('file', df.file, df.name);
-          _setDiscProg(`파일 분석 중: ${df.name}…`);
-          try {
-            const r = await fetch('/.netlify/functions/extract-file', { method: 'POST', body: fd });
-            if (r.ok) { const d = await r.json(); fileTexts += d.text || ''; }
-          } catch(e) {}
-        }
-      }
-      extractedText = fileTexts + (textArea ? '\n' + textArea : '');
+    // ─── 1. 소스별 키워드 추출 (병렬) ───────────────────────────────
+    const tasks = [];
+
+    // [제품/서비스 자료]
+    const productText = document.getElementById('disc-product-text').value.trim();
+    if (_discFiles.length || productText) {
+      anySource = true;
+      tasks.push(_extractFromProduct());
     }
 
-    else if (activeTab === 'competitor' || activeTab === 'owned') {
-      const isComp = activeTab === 'competitor';
-      sourceLabel = isComp ? '경' : '자';
-      const rawUrls = (document.getElementById(isComp ? 'disc-competitor-urls' : 'disc-owned-urls').value || '').trim();
-      const urls = rawUrls.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
-      if (!urls.length) { result.innerHTML = `<div class="card"><div class="stream-box">URL을 한 줄에 하나씩 입력해주세요.</div></div>`; return; }
-
-      for (const url of urls.slice(0, 5)) {
-        _setDiscProg(`크롤링 중: ${url.slice(0, 50)}…`);
-        try {
-          const r = await fetch('/.netlify/functions/crawl-url', {
-            method: 'POST', body: JSON.stringify({ url }),
-            headers: { 'Content-Type': 'application/json' }
-          });
-          if (r.ok) {
-            const d = await r.json();
-            if (d.text) {
-              extractedText += d.text + '\n---\n';
-              urlSources.push({ url, label: isComp ? '[경쟁사]' : '[자사]' });
-            }
-          }
-        } catch(e) {}
-      }
+    // [경쟁사 URL]
+    const compUrls = (document.getElementById('disc-competitor-urls').value || '').trim();
+    if (compUrls) {
+      anySource = true;
+      tasks.push(_extractFromUrls(compUrls, '경'));
     }
 
-    else if (activeTab === 'news') {
-      sourceLabel = '뉴';
-      const topic = document.getElementById('disc-news-topic').value.trim() || 'IT/테크';
-      _setDiscProg('뉴스 RSS 수집 중…');
-      try {
-        const r = await fetch('/.netlify/functions/news-rss', {
-          method: 'POST', body: JSON.stringify({ topic }),
-          headers: { 'Content-Type': 'application/json' }
-        });
-        if (r.ok) {
-          const d = await r.json();
-          articles = d.articles || [];
-          extractedText = articles.map(a => `[${a.title}]\n${a.summary}`).join('\n\n');
-        }
-      } catch(e) {}
+    // [자사 URL]
+    const ownedUrls = (document.getElementById('disc-owned-urls').value || '').trim();
+    if (ownedUrls) {
+      anySource = true;
+      tasks.push(_extractFromUrls(ownedUrls, '자'));
     }
 
-    if (!extractedText && !articles.length) {
-      result.innerHTML = `<div class="card"><div class="stream-box">분석할 내용이 없습니다. 파일이나 URL, 키워드를 입력해주세요.</div></div>`;
+    // [뉴스 트렌드]
+    const newsTopic = document.getElementById('disc-news-topic').value.trim();
+    if (newsTopic) {
+      anySource = true;
+      tasks.push(_extractFromNews(newsTopic));
+    }
+
+    if (!anySource) {
+      result.innerHTML = `<div class="card"><div class="stream-box">입력된 소스가 없습니다. 최소 하나의 탭에 내용을 입력해주세요.</div></div>`;
       return;
     }
 
-    // AI 키워드 추출
-    _setDiscProg('AI로 키워드 추출 중…');
-    const aiPrompt = `당신은 IT/테크 SEO 전문가입니다. 아래 텍스트에서 콘텐츠 마케팅에 활용할 수 있는 핵심 키워드를 30개 추출해주세요.
+    _setDiscProg(`총 ${tasks.length}개 소스에서 키워드 추출 중…`);
 
-텍스트:
-${extractedText.slice(0, 4000)}
+    // 병렬로 소스별 키워드 추출
+    const sourceResults = await Promise.all(tasks);
+    sourceResults.forEach(r => { if (r) allExtracted.push(...r); });
 
-반드시 JSON만 출력하세요 (설명 없이):
-{"keywords":[{"keyword":"키워드","intent":"인지|고려|전환","reason":"선정 이유 15자 이내"}]}
-- intent: (가격|신청|구매|다운|설치) → 전환, (추천|비교|후기|차이|리뷰) → 고려, 나머지 → 인지`;
-
-    const aiResp = await callClaude(aiPrompt);
-    if (!aiResp) return;
-    let rawKws = [];
-    try {
-      const parsed = JSON.parse(aiResp.replace(/```json|```/g, '').trim());
-      rawKws = parsed.keywords || [];
-    } catch(e) {
-      result.innerHTML = `<div class="card"><div class="stream-box">AI 응답 파싱 오류: ${aiResp.slice(0,300)}</div></div>`;
+    if (!allExtracted.length) {
+      result.innerHTML = `<div class="card"><div class="stream-box">키워드를 추출하지 못했습니다. 입력 내용을 확인해주세요.</div></div>`;
       return;
     }
 
-    // 키워드 객체 구성
-    const keywords = rawKws.map(k => ({
-      keyword: k.keyword,
-      intent: k.intent || '인지',
-      reason: k.reason || '',
-      sources: [sourceLabel].filter(Boolean),
-      volumeN: 0, volumeG: 0, kd: null,
-      urlSources,
-      articles: articles.slice(0, 5)
-    }));
+    // ─── 2. 동일 키워드 통합 (소스 배지 누적) ───────────────────────
+    _setDiscProg('중복 키워드 통합 중…');
+    const merged = _mergeKeywords(allExtracted);
 
-    // 네이버 검색량 병렬 조회 (5개씩)
-    _setDiscProg('네이버 검색량 조회 중…');
+    // ─── 3. 네이버 검색량 조회 ──────────────────────────────────────
+    _setDiscProg(`네이버 검색량 조회 중… (총 ${merged.length}개)`);
     const kwChunks = [];
-    for (let i = 0; i < keywords.length; i += 5) kwChunks.push(keywords.slice(i, i + 5));
+    for (let i = 0; i < merged.length; i += 5) kwChunks.push(merged.slice(i, i + 5));
     for (const chunk of kwChunks) {
       const hints = chunk.map(k => k.keyword.replace(/[^a-zA-Z0-9가-힣\s]/g, '')).filter(Boolean).join(',');
       if (!hints) continue;
@@ -1382,56 +1326,164 @@ ${extractedText.slice(0, 4000)}
       await new Promise(r => setTimeout(r, 150));
     }
 
-    // DataForSEO 구글 검색량 + KD
+    // ─── 4. DataForSEO 구글 검색량 + KD ────────────────────────────
     _setDiscProg('Google 데이터 조회 중…');
     try {
       const dfsRes = await fetch('/.netlify/functions/dataforseo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keywords: keywords.map(k => k.keyword) })
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keywords: merged.map(k => k.keyword) })
       });
       if (dfsRes.ok) {
         const dfsData = await dfsRes.json();
-        for (const kw of keywords) {
+        for (const kw of merged) {
           const d = dfsData[kw.keyword];
           if (d) { kw.volumeG = d.volume_g || 0; kw.kd = d.kd || null; }
         }
       }
     } catch(e) {}
 
-    // DataForSEO SERP (상위 10개 키워드만)
+    // ─── 5. DataForSEO SERP (검색량 상위 10개) ────────────────────
     _setDiscProg('Google SERP 조회 중…');
     try {
-      const topKws = [...keywords].sort((a,b) => b.volumeN - a.volumeN).slice(0, 10).map(k => k.keyword);
+      const topKws = [...merged].sort((a,b) => b.volumeN - a.volumeN).slice(0, 10).map(k => k.keyword);
       const serpRes = await fetch('/.netlify/functions/dataforseo-serp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ keywords: topKws })
       });
       if (serpRes.ok) {
         const serpData = await serpRes.json();
-        for (const kw of keywords) {
+        for (const kw of merged) {
           if (serpData[kw.keyword]) {
             kw.serpItems = serpData[kw.keyword];
-            kw.sources = [...new Set([...kw.sources, '구'])];
+            if (!kw.sources.includes('구')) kw.sources.push('구');
           }
         }
       }
     } catch(e) {}
 
-    // 추천도 계산
-    const maxVolN = Math.max(...keywords.map(k => k.volumeN), 1);
-    keywords.forEach(kw => { kw.score = computeDiscScore(kw, maxVolN); });
-    keywords.sort((a, b) => b.volumeN - a.volumeN);
+    // ─── 6. 추천도 계산 후 정렬 ────────────────────────────────────
+    const maxVolN = Math.max(...merged.map(k => k.volumeN || 0), 1);
+    merged.forEach(kw => { kw.score = computeDiscScore(kw, maxVolN); });
+    merged.sort((a, b) => b.volumeN - a.volumeN);
 
-    _lastDiscKeywords = keywords;
-    _cacheDiscoverResult(keywords);
-    renderDiscoverTable(keywords);
+    _lastDiscKeywords = merged;
+    _cacheDiscoverResult(merged);
+    renderDiscoverTable(merged);
 
   } catch(e) {
     result.innerHTML = `<div class="card"><div class="stream-box">오류: ${e.message}</div></div>`;
   }
 }
+
+// ── 소스별 추출 헬퍼 ──────────────────────────────────────────────────
+
+async function _extractFromProduct() {
+  let fileTexts = '';
+  const textArea = document.getElementById('disc-product-text').value.trim();
+  for (const df of _discFiles) {
+    const ext = df.name.split('.').pop().toLowerCase();
+    if (['jpg','jpeg','png'].includes(ext)) {
+      const b64 = await _fileToBase64(df.file);
+      fileTexts += `\n[이미지: ${df.name}]\n` + await _extractImageText(b64, df.name);
+    } else {
+      const fd = new FormData();
+      fd.append('file', df.file, df.name);
+      try {
+        const r = await fetch('/.netlify/functions/extract-file', { method: 'POST', body: fd });
+        if (r.ok) { const d = await r.json(); fileTexts += d.text || ''; }
+      } catch(e) {}
+    }
+  }
+  const combinedText = fileTexts + (textArea ? '\n' + textArea : '');
+  if (!combinedText.trim()) return [];
+  return await _aiExtractKeywords(combinedText, 'AI', [], []);
+}
+
+async function _extractFromUrls(rawInput, sourceLabel) {
+  const urls = rawInput.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+  if (!urls.length) return [];
+  let extractedText = '';
+  const urlSources = [];
+  for (const url of urls.slice(0, 5)) {
+    try {
+      const r = await fetch('/.netlify/functions/crawl-url', {
+        method: 'POST', body: JSON.stringify({ url }),
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (r.ok) {
+        const d = await r.json();
+        if (d.text) { extractedText += d.text + '\n---\n'; urlSources.push({ url, label: sourceLabel === '경' ? '[경쟁사]' : '[자사]' }); }
+      }
+    } catch(e) {}
+  }
+  if (!extractedText) return [];
+  return await _aiExtractKeywords(extractedText, sourceLabel, urlSources, []);
+}
+
+async function _extractFromNews(topic) {
+  let articles = [];
+  try {
+    const r = await fetch('/.netlify/functions/news-rss', {
+      method: 'POST', body: JSON.stringify({ topic }),
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (r.ok) { const d = await r.json(); articles = d.articles || []; }
+  } catch(e) {}
+  if (!articles.length) return [];
+  const text = articles.map(a => `[${a.title}]\n${a.summary}`).join('\n\n');
+  return await _aiExtractKeywords(text, '뉴', [], articles.slice(0, 5));
+}
+
+async function _aiExtractKeywords(text, sourceLabel, urlSources, articles) {
+  const prompt = `당신은 IT/테크 SEO 전문가입니다. 아래 텍스트에서 콘텐츠 마케팅에 활용할 수 있는 핵심 키워드를 20개 추출해주세요.
+
+텍스트:
+${text.slice(0, 3500)}
+
+반드시 JSON만 출력하세요 (설명 없이):
+{"keywords":[{"keyword":"키워드","intent":"인지|고려|전환","reason":"선정 이유 15자 이내"}]}
+- intent: (가격|신청|구매|다운|설치) → 전환, (추천|비교|후기|차이|리뷰) → 고려, 나머지 → 인지`;
+
+  const aiResp = await callClaude(prompt);
+  if (!aiResp) return [];
+  try {
+    const parsed = JSON.parse(aiResp.replace(/```json|```/g, '').trim());
+    return (parsed.keywords || []).map(k => ({
+      keyword: k.keyword,
+      intent: k.intent || '인지',
+      reason: k.reason || '',
+      sources: [sourceLabel],
+      volumeN: 0, volumeG: 0, kd: null,
+      urlSources,
+      articles
+    }));
+  } catch(e) { return []; }
+}
+
+// ── 동일 키워드 통합 ──────────────────────────────────────────────────
+function _mergeKeywords(rawList) {
+  const map = new Map();
+  for (const kw of rawList) {
+    const key = kw.keyword.toLowerCase().replace(/\s+/g, '');
+    if (map.has(key)) {
+      const existing = map.get(key);
+      // 소스 배지 누적 (중복 제거)
+      for (const s of kw.sources) {
+        if (!existing.sources.includes(s)) existing.sources.push(s);
+      }
+      // urlSources, articles 누적
+      existing.urlSources.push(...(kw.urlSources || []));
+      existing.articles.push(...(kw.articles || []));
+    } else {
+      map.set(key, { ...kw,
+        urlSources: [...(kw.urlSources || [])],
+        articles: [...(kw.articles || [])]
+      });
+    }
+  }
+  return Array.from(map.values());
+}
+
 
 function _setDiscProg(msg) {
   const el = document.getElementById('disc-prog');
